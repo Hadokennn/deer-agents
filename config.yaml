@@ -1,0 +1,22 @@
+# config.yaml — Global configuration for deer-agents
+default_agent: oncall
+
+models:
+  - name: doubao-seed-1.8
+    display_name: Doubao-Seed-1.8
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: doubao-seed-1-8-251228
+    api_base: https://ark.cn-beijing.volces.com/api/v3
+    api_key: $VOLCENGINE_API_KEY
+    supports_thinking: true
+    supports_vision: true
+
+sandbox:
+  type: local
+
+checkpointer:
+  type: sqlite
+  path: ~/.deer-agents/checkpoints.db
+
+sessions:
+  dir: ~/.deer-agents/sessions/

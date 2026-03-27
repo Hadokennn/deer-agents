@@ -1,0 +1,29 @@
+# agents/oncall/agent.yaml
+name: oncall
+display_name: "Oncall 答疑助手"
+description: "业务 oncall 答疑，连接告警平台和 runbook"
+
+model: doubao-seed-1.8
+thinking_enabled: true
+
+tool_groups:
+  - web
+  - file
+  - bash
+
+mcp_servers: []
+
+extra_middlewares:
+  - use: middlewares.mcp_overflow:McpOverflowMiddleware
+    config:
+      max_response_size: 8192
+      sandbox_path: /tmp/mcp_responses/
+
+code_repos: []
+
+knowledge_dirs:
+  - ./agents/oncall/knowledge/
+
+skills_dir: ./agents/oncall/skills/
+
+prompt: ./agents/oncall/prompt.md
