@@ -1,0 +1,216 @@
+# cli/shell.py
+"""Interactive REPL shell using prompt_toolkit."""
+
+import uuid
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from rich.console import Console
+
+from cli.app import (
+    PROJECT_ROOT,
+    list_available_agents,
+    load_agent_config,
+    load_global_config,
+    merge_agent_config,
+    resolve_agent_name,
+)
+from cli.commands import (
+    handle_agents,
+    handle_help,
+    handle_sessions,
+    handle_status,
+    parse_command,
+)
+from cli.renderer import render_stream
+from cli.sessions import SessionManager
+
+console = Console()
+
+
+class DeerShell:
+    """Interactive agent shell."""
+
+    def __init__(self, agent_name: str | None = None):
+        self.global_cfg = load_global_config()
+        self.agent_name = resolve_agent_name(agent_name, self.global_cfg)
+        self.agent_cfg = self._load_merged_config(self.agent_name)
+        self.thread_id = str(uuid.uuid4())[:8]
+        self.client = None  # Lazy init
+        self._checkpointer = None
+        self._extra_middlewares = []
+
+        # Session management
+        sessions_dir = self.global_cfg.get("sessions", {}).get("dir", "~/.deer-agents/sessions/")
+        from pathlib import Path
+        self.session_mgr = SessionManager(Path(sessions_dir).expanduser())
+
+        # Prompt history
+        history_path = Path("~/.deer-agents/history").expanduser()
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.prompt_session = PromptSession(history=FileHistory(str(history_path)))
+
+    def _load_merged_config(self, agent_name: str) -> dict:
+        agent_cfg = load_agent_config(agent_name)
+        return merge_agent_config(self.global_cfg, agent_cfg)
+
+    def _load_extra_middlewares(self):
+        """Instantiate extra middleware from agent config."""
+        from importlib import import_module
+
+        extra_cfg = self.agent_cfg.get("extra_middlewares", [])
+        middlewares = []
+        for mw_cfg in extra_cfg:
+            use = mw_cfg["use"]  # e.g., "middlewares.mcp_overflow:McpOverflowMiddleware"
+            module_path, class_name = use.rsplit(":", 1)
+            mod = import_module(module_path)
+            cls = getattr(mod, class_name)
+            kwargs = mw_cfg.get("config", {})
+            middlewares.append(cls(**kwargs))
+        return middlewares
+
+    def _ensure_client(self):
+        """Lazy-initialize or re-create DeerFlowClient."""
+        if self.client is not None:
+            return
+
+        from deerflow.client import DeerFlowClient
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        from pathlib import Path
+
+        # Set up checkpointer
+        cp_cfg = self.global_cfg.get("checkpointer", {})
+        cp_path = Path(cp_cfg.get("path", "~/.deer-agents/checkpoints.db")).expanduser()
+        cp_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._checkpointer = SqliteSaver.from_conn_string(str(cp_path))
+        self._checkpointer.setup()
+
+        # Load extra middlewares from agent config
+        self._extra_middlewares = self._load_extra_middlewares()
+
+        # Point DeerFlowClient at our project's config.yaml
+        config_path = str(PROJECT_ROOT / "config.yaml")
+
+        self.client = DeerFlowClient(
+            config_path=config_path,
+            checkpointer=self._checkpointer,
+            model_name=self.agent_cfg.get("model"),
+            thinking_enabled=self.agent_cfg.get("thinking_enabled", True),
+            agent_name=self.agent_name,
+        )
+
+    def _switch_agent(self, new_agent: str) -> bool:
+        """Switch to a different agent. Returns True on success."""
+        available = list_available_agents()
+        if new_agent not in available:
+            console.print(f"  [red]Unknown agent: {new_agent}[/red]")
+            console.print(f"  Available: {', '.join(available)}")
+            return False
+
+        self.agent_name = new_agent
+        self.agent_cfg = self._load_merged_config(new_agent)
+        self.thread_id = str(uuid.uuid4())[:8]
+        self.client = None  # Force re-create on next message
+        console.print(f"  [green]✓ Switched to {new_agent} agent[/green]")
+        return True
+
+    def _resume_session(self, thread_id: str) -> bool:
+        """Resume a previous session. Returns True on success."""
+        session = self.session_mgr.get(thread_id)
+        if session is None:
+            console.print(f"  [red]Session not found: {thread_id}[/red]")
+            return False
+
+        agent_name = session["agent_name"]
+        self.agent_name = agent_name
+        self.agent_cfg = self._load_merged_config(agent_name)
+        self.thread_id = thread_id
+        self.client = None  # Force re-create
+        title = session.get("title") or "(untitled)"
+        console.print(f"  [green]✓ Resumed {agent_name} session: \"{title}\"[/green]")
+        return True
+
+    def _handle_command(self, cmd) -> bool:
+        """Handle a parsed command. Returns False if shell should exit."""
+        if cmd.name == "exit":
+            return False
+        elif cmd.name == "help":
+            handle_help()
+        elif cmd.name == "agents":
+            handle_agents(list_available_agents(), self.agent_name)
+        elif cmd.name == "switch":
+            if not cmd.args:
+                console.print("  Usage: /switch <agent_name>")
+            else:
+                self._switch_agent(cmd.args.strip())
+        elif cmd.name == "sessions":
+            handle_sessions(self.session_mgr.list_all())
+        elif cmd.name == "resume":
+            if not cmd.args:
+                console.print("  Usage: /resume <thread_id>")
+            else:
+                self._resume_session(cmd.args.strip())
+        elif cmd.name == "status":
+            handle_status(self.agent_name, self.thread_id, self.agent_cfg)
+        else:
+            console.print(f"  Unknown command: /{cmd.name}. Type /help for available commands.")
+        return True
+
+    def _send_message(self, text: str) -> None:
+        """Send a message to the current agent and render the response."""
+        self._ensure_client()
+
+        # Create session if this is the first message on this thread
+        if self.session_mgr.get(self.thread_id) is None:
+            self.session_mgr.create(self.thread_id, agent_name=self.agent_name)
+
+        try:
+            events = self.client.stream(
+                text,
+                thread_id=self.thread_id,
+                extra_middlewares=self._extra_middlewares if self._extra_middlewares else None,
+            )
+            title = render_stream(events)
+
+            # Update session metadata
+            if title:
+                self.session_mgr.update(self.thread_id, title=title)
+            else:
+                self.session_mgr.touch(self.thread_id)
+
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]Interrupted[/yellow]")
+        except Exception as e:
+            console.print(f"\n  [red]Error: {e}[/red]")
+
+    def run(self) -> None:
+        """Main REPL loop."""
+        console.print(f"\n  [bold]🦌 Deer Agents[/bold] — {self.agent_name} agent ready")
+        console.print(f"  Type /help for commands, /exit to quit\n")
+
+        while True:
+            try:
+                # Dynamic prompt showing current agent
+                prompt_text = f"🦌 {self.agent_name} > " if self.agent_name != self.global_cfg.get("default_agent") else "🦌 > "
+                user_input = self.prompt_session.prompt(prompt_text)
+
+                if not user_input.strip():
+                    continue
+
+                # Check for commands
+                cmd = parse_command(user_input)
+                if cmd is not None:
+                    if not self._handle_command(cmd):
+                        break
+                    continue
+
+                # Regular message — send to agent
+                self._send_message(user_input)
+
+            except KeyboardInterrupt:
+                continue  # Ctrl+C just cancels current input
+            except EOFError:
+                break  # Ctrl+D exits
+
+        console.print("\n  [dim]Bye 👋[/dim]\n")
