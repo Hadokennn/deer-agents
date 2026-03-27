@@ -205,7 +205,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None):
+def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, extra_middlewares: list | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
@@ -257,6 +257,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
         max_concurrent_subagents = config.get("configurable", {}).get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
+    # Inject extra middlewares (from deer-agents or custom config)
+    if extra_middlewares:
+        middlewares.extend(extra_middlewares)
+
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     middlewares.append(LoopDetectionMiddleware())
 
@@ -280,6 +284,7 @@ def make_lead_agent(config: RunnableConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
+    extra_middlewares = cfg.get("extra_middlewares", None)
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
@@ -328,7 +333,7 @@ def make_lead_agent(config: RunnableConfig):
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name),
+            middleware=_build_middlewares(config, model_name=model_name, extra_middlewares=extra_middlewares),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
             state_schema=ThreadState,
         )
@@ -337,7 +342,7 @@ def make_lead_agent(config: RunnableConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, extra_middlewares=extra_middlewares),
         system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name),
         state_schema=ThreadState,
     )
