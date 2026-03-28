@@ -27,17 +27,10 @@ def render_stream(stream_events) -> str | None:
                 title = event.data.get("title") or title
 
             elif event.type == "messages-tuple":
-                # Per-message update: (message_dict, metadata_dict)
-                msg_data = event.data
-                if isinstance(msg_data, (list, tuple)) and len(msg_data) >= 1:
-                    msg = msg_data[0]
-                    # AI text content
-                    content = ""
-                    if isinstance(msg, dict):
-                        content = msg.get("content", "")
-                    else:
-                        content = getattr(msg, "content", "")
-
+                # event.data is a flat dict: {type, content, id, usage_metadata, ...}
+                msg = event.data
+                if isinstance(msg, dict) and msg.get("type") == "ai":
+                    content = msg.get("content", "")
                     if isinstance(content, str) and content:
                         collected_text = content
                         live.update(Markdown(collected_text))

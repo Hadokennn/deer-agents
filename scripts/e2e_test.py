@@ -85,6 +85,32 @@ def test_stream(client):
     print("  ✓ Stream OK")
 
 
+def test_renderer(client):
+    """Step 6: Does renderer extract AI content correctly?"""
+    print("=" * 60)
+    print("Step 6: Testing renderer with real stream...")
+    from cli.renderer import render_stream
+    from io import StringIO
+    from rich.console import Console
+
+    # Capture output to verify renderer produces content
+    buf = StringIO()
+    import cli.renderer as r
+    original_console = r.console
+    r.console = Console(file=buf, force_terminal=True)
+
+    try:
+        title = render_stream(client.stream("说一个字", thread_id="e2e-test-3"))
+        output = buf.getvalue()
+        print(f"  Title: {title}")
+        print(f"  Output length: {len(output)} chars")
+        print(f"  Output preview: {repr(output[:100])}")
+        assert len(output) > 0, "Renderer produced no output!"
+        print("  ✓ Renderer OK")
+    finally:
+        r.console = original_console
+
+
 if __name__ == "__main__":
     print("\n🦌 Deer Agents E2E Test\n")
 
@@ -117,6 +143,13 @@ if __name__ == "__main__":
 
     try:
         test_stream(client)
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+
+    try:
+        test_renderer(client)
     except Exception as e:
         print(f"  ✗ FAILED: {e}")
         import traceback; traceback.print_exc()
