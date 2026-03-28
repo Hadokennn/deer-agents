@@ -93,6 +93,7 @@ prompt: ./agents/my-agent/prompt.md
 
 ```bash
 # 拉取上游更新
+git fetch deer-flow-upstream
 git subtree pull --prefix=deer-flow deer-flow-upstream main --squash
 ```
 
