@@ -1,0 +1,126 @@
+"""End-to-end test: bypass REPL, call DeerFlowClient directly."""
+
+import sys
+import os
+
+# Ensure project root is on path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEERFLOW_CONFIG = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
+
+# Pin env var so all internal get_app_config() calls use deer-flow's config
+os.environ["DEER_FLOW_CONFIG_PATH"] = DEERFLOW_CONFIG
+
+
+def test_config_loads():
+    """Step 1: Can deer-flow config load without error?"""
+    print("=" * 60)
+    print("Step 1: Loading deer-flow config...")
+    from deerflow.config.app_config import reload_app_config
+    config = reload_app_config(DEERFLOW_CONFIG)
+    print(f"  Models: {[m.name for m in config.models]}")
+    print(f"  Tools:  {[t.name for t in config.tools]}")
+    print(f"  Sandbox: {config.sandbox}")
+    print("  ✓ Config loaded OK")
+    return config
+
+
+def test_model_resolves(config):
+    """Step 2: Can the model class be instantiated?"""
+    print("=" * 60)
+    print("Step 2: Resolving model...")
+    model_cfg = config.models[0]
+    print(f"  Model: {model_cfg.name}")
+    print(f"  Use:   {model_cfg.use}")
+
+    from deerflow.models import create_chat_model
+    model = create_chat_model(name=model_cfg.name, thinking_enabled=False)
+    print(f"  Class: {type(model).__name__}")
+    print("  ✓ Model resolved OK")
+    return model
+
+
+def test_client_creates():
+    """Step 3: Can DeerFlowClient be created?"""
+    print("=" * 60)
+    print("Step 3: Creating DeerFlowClient...")
+    from deerflow.client import DeerFlowClient
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    cp_path = Path("~/.deer-agents/checkpoints.db").expanduser()
+    cp_path.parent.mkdir(parents=True, exist_ok=True)
+    cp_ctx = SqliteSaver.from_conn_string(str(cp_path))
+    checkpointer = cp_ctx.__enter__()
+    checkpointer.setup()
+
+    client = DeerFlowClient(
+        config_path=DEERFLOW_CONFIG,
+        checkpointer=checkpointer,
+        thinking_enabled=False,
+    )
+    print(f"  ✓ Client created OK")
+    return client, cp_ctx
+
+
+def test_chat(client):
+    """Step 4: Can we send a message and get a response?"""
+    print("=" * 60)
+    print("Step 4: Sending '你好' via client.chat()...")
+    response = client.chat("你好", thread_id="e2e-test-1")
+    print(f"  Response: {response[:200]}")
+    print("  ✓ Chat OK")
+
+
+def test_stream(client):
+    """Step 5: Can we stream a response?"""
+    print("=" * 60)
+    print("Step 5: Streaming '你好' via client.stream()...")
+    for event in client.stream("你好", thread_id="e2e-test-2"):
+        print(f"  Event: type={event.type}, data_keys={list(event.data.keys()) if isinstance(event.data, dict) else type(event.data).__name__}")
+        if event.type == "end":
+            break
+    print("  ✓ Stream OK")
+
+
+if __name__ == "__main__":
+    print("\n🦌 Deer Agents E2E Test\n")
+
+    try:
+        config = test_config_loads()
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        sys.exit(1)
+
+    try:
+        model = test_model_resolves(config)
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+
+    try:
+        client, cp_ctx = test_client_creates()
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+
+    try:
+        test_chat(client)
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+
+    try:
+        test_stream(client)
+    except Exception as e:
+        print(f"  ✗ FAILED: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+
+    print("\n" + "=" * 60)
+    print("🎉 All steps passed!")

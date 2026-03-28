@@ -90,8 +90,11 @@ class DeerShell:
         # Load extra middlewares from agent config
         self._extra_middlewares = self._load_extra_middlewares()
 
-        # DeerFlowClient reads deer-flow's own config.yaml (has tools, memory, etc.)
+        # Pin DEER_FLOW_CONFIG_PATH so all internal get_app_config() calls
+        # resolve to deer-flow/config.yaml, not the root config.yaml
+        import os
         config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
+        os.environ["DEER_FLOW_CONFIG_PATH"] = config_path
 
         self.client = DeerFlowClient(
             config_path=config_path,
