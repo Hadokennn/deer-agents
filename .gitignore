@@ -6,3 +6,5 @@ dist/
 build/
 .env
 .claude/
+memory.json
+threads/
