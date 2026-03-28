@@ -83,7 +83,8 @@ class DeerShell:
         cp_path = Path(cp_cfg.get("path", "~/.deer-agents/checkpoints.db")).expanduser()
         cp_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self._checkpointer = SqliteSaver.from_conn_string(str(cp_path))
+        self._cp_context = SqliteSaver.from_conn_string(str(cp_path))
+        self._checkpointer = self._cp_context.__enter__()
         self._checkpointer.setup()
 
         # Load extra middlewares from agent config
