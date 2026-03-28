@@ -20,6 +20,7 @@ from cli.commands import (
     handle_help,
     handle_sessions,
     handle_status,
+    handle_trace,
     parse_command,
 )
 from cli.renderer import render_stream
@@ -162,6 +163,8 @@ class DeerShell:
                 self._resume_session(cmd.args.strip())
         elif cmd.name == "status":
             handle_status(self.agent_name, self.thread_id, self.agent_cfg)
+        elif cmd.name == "trace":
+            handle_trace(cmd.args)
         else:
             console.print(f"  Unknown command: /{cmd.name}. Type /help for available commands.")
         return True

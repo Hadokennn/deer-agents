@@ -34,6 +34,8 @@ def handle_help() -> None:
     console.print("  /sessions         List previous sessions")
     console.print("  /resume <id>      Resume a previous session")
     console.print("  /status           Show current agent status")
+    console.print("  /trace            Show recent LangSmith traces")
+    console.print("  /trace <id>       Show detail of a specific trace")
     console.print("  /help             Show this help")
     console.print("  /exit             Exit deer")
     console.print()
@@ -68,6 +70,22 @@ def handle_sessions(sessions: list[dict[str, Any]]) -> None:
         )
     console.print(table)
     console.print()
+
+
+def handle_trace(args: str) -> None:
+    """Show LangSmith traces."""
+    try:
+        import sys
+        sys.path.insert(0, ".")
+        from scripts.trace_inspector import cmd_recent, cmd_detail
+        if not args:
+            cmd_recent(limit=5)
+        else:
+            cmd_detail(run_id=args.strip())
+    except ImportError:
+        console.print("  [red]LangSmith not configured. Check deer-flow/.env[/red]")
+    except Exception as e:
+        console.print(f"  [red]Trace error: {e}[/red]")
 
 
 def handle_status(agent_name: str, thread_id: str, config: dict[str, Any]) -> None:
