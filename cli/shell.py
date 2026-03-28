@@ -90,14 +90,14 @@ class DeerShell:
         # Load extra middlewares from agent config
         self._extra_middlewares = self._load_extra_middlewares()
 
-        # Point DeerFlowClient at our project's config.yaml
-        config_path = str(PROJECT_ROOT / "config.yaml")
+        # DeerFlowClient reads deer-flow's own config.yaml (has tools, memory, etc.)
+        config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
 
         self.client = DeerFlowClient(
             config_path=config_path,
             checkpointer=self._checkpointer,
             model_name=self.agent_cfg.get("model"),
-            thinking_enabled=self.agent_cfg.get("thinking_enabled", True),
+            thinking_enabled=self.agent_cfg.get("thinking_enabled", False),
             agent_name=self.agent_name,
         )
 

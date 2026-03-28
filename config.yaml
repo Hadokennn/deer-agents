@@ -1,18 +1,7 @@
-# config.yaml — Global configuration for deer-agents
+# config.yaml — deer-agents 自身配置
+# 模型、tools、memory 等 deer-flow 配置在 deer-flow/config.yaml 中维护
+
 default_agent: oncall
-
-models:
-  - name: doubao-seed-1.8
-    display_name: Doubao-Seed-1.8
-    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-    model: doubao-seed-1-8-251228
-    api_base: https://ark.cn-beijing.volces.com/api/v3
-    api_key: $VOLCENGINE_API_KEY
-    supports_thinking: true
-    supports_vision: true
-
-sandbox:
-  type: local
 
 checkpointer:
   type: sqlite

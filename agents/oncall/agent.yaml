@@ -4,11 +4,12 @@ display_name: "Oncall 答疑助手"
 description: "业务 oncall 答疑，连接告警平台和 runbook"
 
 model: deepseek-v3
-thinking_enabled: true
+thinking_enabled: false
 
 tool_groups:
   - web
-  - file
+  - file:read
+  - file:write
   - bash
 
 mcp_servers: []
