@@ -31,7 +31,7 @@ console = Console()
 class DeerShell:
     """Interactive agent shell."""
 
-    def __init__(self, agent_name: str | None = None):
+    def __init__(self, agent_name: str | None = None, verbose: bool = False):
         self.global_cfg = load_global_config()
         self.agent_name = resolve_agent_name(agent_name, self.global_cfg)
         self.agent_cfg = self._load_merged_config(self.agent_name)
@@ -39,6 +39,7 @@ class DeerShell:
         self.client = None  # Lazy init
         self._checkpointer = None
         self._extra_middlewares = []
+        self._verbose = verbose
 
         # Session management
         sessions_dir = self.global_cfg.get("sessions", {}).get("dir", "~/.deer-agents/sessions/")
@@ -90,9 +91,13 @@ class DeerShell:
         # Load extra middlewares from agent config
         self._extra_middlewares = self._load_extra_middlewares()
 
+        import os
+        # Load deer-flow/.env for API keys
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT_ROOT / "deer-flow" / ".env")
+
         # Pin DEER_FLOW_CONFIG_PATH so all internal get_app_config() calls
         # resolve to deer-flow/config.yaml, not the root config.yaml
-        import os
         config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
         os.environ["DEER_FLOW_CONFIG_PATH"] = config_path
 
@@ -175,18 +180,29 @@ class DeerShell:
                 thread_id=self.thread_id,
                 extra_middlewares=self._extra_middlewares if self._extra_middlewares else None,
             )
-            title = render_stream(events)
+            result = render_stream(events, verbose=self._verbose)
 
             # Update session metadata
-            if title:
-                self.session_mgr.update(self.thread_id, title=title)
+            if result.title:
+                self.session_mgr.update(self.thread_id, title=result.title)
             else:
                 self.session_mgr.touch(self.thread_id)
 
         except KeyboardInterrupt:
             console.print("\n  [yellow]Interrupted[/yellow]")
+        except ConnectionError as e:
+            console.print(f"\n  [red]Connection error: Cannot reach the model API.[/red]")
+            console.print(f"  [dim]{e}[/dim]")
+        except TimeoutError as e:
+            console.print(f"\n  [red]Request timed out. The model may be overloaded.[/red]")
+            console.print(f"  [dim]{e}[/dim]")
         except Exception as e:
-            console.print(f"\n  [red]Error: {e}[/red]")
+            console.print(f"\n  [red]Error ({type(e).__name__}): {e}[/red]")
+            if self._verbose:
+                import traceback
+                console.print(f"  [dim]{traceback.format_exc()}[/dim]")
+            else:
+                console.print(f"  [dim]Run with --verbose for full traceback.[/dim]")
 
     def run(self) -> None:
         """Main REPL loop."""
