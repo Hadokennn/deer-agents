@@ -17,7 +17,9 @@ from cli.app import (
 )
 from cli.commands import (
     handle_agents,
+    handle_diagnose,
     handle_help,
+    handle_replay,
     handle_sessions,
     handle_status,
     handle_trace,
@@ -165,6 +167,10 @@ class DeerShell:
             handle_status(self.agent_name, self.thread_id, self.agent_cfg)
         elif cmd.name == "trace":
             handle_trace(cmd.args)
+        elif cmd.name == "replay":
+            handle_replay(cmd.args, self.thread_id)
+        elif cmd.name == "diagnose":
+            handle_diagnose(self.thread_id)
         else:
             console.print(f"  Unknown command: /{cmd.name}. Type /help for available commands.")
         return True

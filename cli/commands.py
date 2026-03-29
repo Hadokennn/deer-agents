@@ -36,6 +36,9 @@ def handle_help() -> None:
     console.print("  /status           Show current agent status")
     console.print("  /trace            Show recent LangSmith traces")
     console.print("  /trace <id>       Show detail of a specific trace")
+    console.print("  /replay           Show step history for current thread")
+    console.print("  /replay <N>       Replay from step N")
+    console.print("  /diagnose         Auto-detect anomalies in current thread")
     console.print("  /help             Show this help")
     console.print("  /exit             Exit deer")
     console.print()
@@ -70,6 +73,34 @@ def handle_sessions(sessions: list[dict[str, Any]]) -> None:
         )
     console.print(table)
     console.print()
+
+
+def handle_replay(args: str, thread_id: str) -> None:
+    """Show step history or replay from a step."""
+    try:
+        import sys
+        sys.path.insert(0, ".")
+        from scripts.trace_replay import cmd_steps, cmd_replay
+        if not args:
+            cmd_steps(thread_id)
+        else:
+            step_num = int(args.strip())
+            cmd_replay(thread_id, step_num)
+    except ValueError:
+        console.print("  Usage: /replay <step_number>")
+    except Exception as e:
+        console.print(f"  [red]Replay error: {e}[/red]")
+
+
+def handle_diagnose(thread_id: str) -> None:
+    """Auto-diagnose current thread."""
+    try:
+        import sys
+        sys.path.insert(0, ".")
+        from scripts.trace_replay import cmd_diagnose
+        cmd_diagnose(thread_id)
+    except Exception as e:
+        console.print(f"  [red]Diagnose error: {e}[/red]")
 
 
 def handle_trace(args: str) -> None:
