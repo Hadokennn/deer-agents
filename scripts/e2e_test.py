@@ -7,12 +7,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pathlib import Path
+from cli.bootstrap import setup_env, create_checkpointer
+from cli.app import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+setup_env()
 DEERFLOW_CONFIG = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
-
-# Pin env var so all internal get_app_config() calls use deer-flow's config
-os.environ["DEER_FLOW_CONFIG_PATH"] = DEERFLOW_CONFIG
 
 
 def test_config_loads():
@@ -48,13 +47,8 @@ def test_client_creates():
     print("=" * 60)
     print("Step 3: Creating DeerFlowClient...")
     from deerflow.client import DeerFlowClient
-    from langgraph.checkpoint.sqlite import SqliteSaver
 
-    cp_path = Path("~/.deer-agents/checkpoints.db").expanduser()
-    cp_path.parent.mkdir(parents=True, exist_ok=True)
-    cp_ctx = SqliteSaver.from_conn_string(str(cp_path))
-    checkpointer = cp_ctx.__enter__()
-    checkpointer.setup()
+    checkpointer, cp_ctx = create_checkpointer()
 
     client = DeerFlowClient(
         config_path=DEERFLOW_CONFIG,

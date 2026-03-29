@@ -12,11 +12,10 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pathlib import Path
-from dotenv import load_dotenv
+from cli.bootstrap import setup_env, create_checkpointer
+from cli.app import PROJECT_ROOT
 
-load_dotenv(Path(__file__).resolve().parent.parent / "deer-flow" / ".env")
-os.environ.setdefault("DEER_FLOW_CONFIG_PATH", str(Path(__file__).resolve().parent.parent / "deer-flow" / "config.yaml"))
+setup_env()
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -41,17 +40,12 @@ class Step:
 # ---------------------------------------------------------------------------
 
 def _get_checkpointer():
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    cp_path = Path("~/.deer-agents/checkpoints.db").expanduser()
-    ctx = SqliteSaver.from_conn_string(str(cp_path))
-    ck = ctx.__enter__()
-    ck.setup()
-    return ck, ctx
+    return create_checkpointer()
 
 
 def _get_agent(checkpointer):
     from deerflow.client import DeerFlowClient
-    config_path = str(Path(__file__).resolve().parent.parent / "deer-flow" / "config.yaml")
+    config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
     client = DeerFlowClient(config_path=config_path, checkpointer=checkpointer, thinking_enabled=False)
     dummy_config = RunnableConfig(configurable={"thread_id": "_dummy", "thinking_enabled": False}, recursion_limit=100)
     client._ensure_agent(dummy_config)

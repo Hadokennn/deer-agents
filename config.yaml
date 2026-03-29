@@ -5,7 +5,7 @@ default_agent: oncall
 
 checkpointer:
   type: sqlite
-  path: ~/.deer-agents/checkpoints.db
+  path: .deer-flow/checkpoints.db
 
 sessions:
-  dir: ~/.deer-agents/sessions/
+  dir: .deer-flow/sessions/

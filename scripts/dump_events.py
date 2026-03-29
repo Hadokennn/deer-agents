@@ -1,19 +1,15 @@
 """Dump raw StreamEvent format to understand actual data structure."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-os.environ["DEER_FLOW_CONFIG_PATH"] = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
+from cli.bootstrap import setup_env, create_checkpointer
+from cli.app import PROJECT_ROOT
+
+setup_env()
 
 from deerflow.client import DeerFlowClient
-from langgraph.checkpoint.sqlite import SqliteSaver
 
-cp_path = Path("~/.deer-agents/checkpoints.db").expanduser()
-cp_path.parent.mkdir(parents=True, exist_ok=True)
-cp_ctx = SqliteSaver.from_conn_string(str(cp_path))
-checkpointer = cp_ctx.__enter__()
-checkpointer.setup()
+checkpointer, cp_ctx = create_checkpointer()
 
 client = DeerFlowClient(
     config_path=str(PROJECT_ROOT / "deer-flow" / "config.yaml"),

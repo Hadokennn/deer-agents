@@ -44,13 +44,16 @@ class DeerShell:
         self._extra_middlewares = []
         self._verbose = verbose
 
-        # Session management
-        sessions_dir = self.global_cfg.get("sessions", {}).get("dir", "~/.deer-agents/sessions/")
+        # Session management (path relative to PROJECT_ROOT)
         from pathlib import Path
-        self.session_mgr = SessionManager(Path(sessions_dir).expanduser())
+        sessions_raw = self.global_cfg.get("sessions", {}).get("dir", ".deer-flow/sessions/")
+        sessions_path = Path(sessions_raw).expanduser()
+        if not sessions_path.is_absolute():
+            sessions_path = PROJECT_ROOT / sessions_path
+        self.session_mgr = SessionManager(sessions_path)
 
         # Prompt history
-        history_path = Path("~/.deer-agents/history").expanduser()
+        history_path = PROJECT_ROOT / ".deer-flow" / "history"
         history_path.parent.mkdir(parents=True, exist_ok=True)
         self.prompt_session = PromptSession(history=FileHistory(str(history_path)))
 
@@ -79,30 +82,15 @@ class DeerShell:
             return
 
         from deerflow.client import DeerFlowClient
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        from pathlib import Path
+        from cli.bootstrap import setup_env, create_checkpointer
 
-        # Set up checkpointer
-        cp_cfg = self.global_cfg.get("checkpointer", {})
-        cp_path = Path(cp_cfg.get("path", "~/.deer-agents/checkpoints.db")).expanduser()
-        cp_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self._cp_context = SqliteSaver.from_conn_string(str(cp_path))
-        self._checkpointer = self._cp_context.__enter__()
-        self._checkpointer.setup()
+        setup_env()
+        self._checkpointer, self._cp_context = create_checkpointer()
 
         # Load extra middlewares from agent config
         self._extra_middlewares = self._load_extra_middlewares()
 
-        import os
-        # Load deer-flow/.env for API keys
-        from dotenv import load_dotenv
-        load_dotenv(PROJECT_ROOT / "deer-flow" / ".env")
-
-        # Pin DEER_FLOW_CONFIG_PATH so all internal get_app_config() calls
-        # resolve to deer-flow/config.yaml, not the root config.yaml
         config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
-        os.environ["DEER_FLOW_CONFIG_PATH"] = config_path
 
         self.client = DeerFlowClient(
             config_path=config_path,

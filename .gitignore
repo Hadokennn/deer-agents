@@ -6,5 +6,6 @@ dist/
 build/
 .env
 .claude/
+.deer-flow/
 memory.json
 threads/

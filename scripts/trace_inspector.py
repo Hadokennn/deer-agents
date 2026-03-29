@@ -12,11 +12,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Load env
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).resolve().parent.parent / "deer-flow" / ".env")
+from cli.bootstrap import setup_env
+setup_env()
 
 
 def _get_client():
