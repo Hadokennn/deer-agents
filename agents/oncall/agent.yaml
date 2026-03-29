@@ -15,10 +15,15 @@ tool_groups:
 mcp_servers: []
 
 extra_middlewares:
-  - use: middlewares.mcp_overflow:McpOverflowMiddleware
+  - use: middlewares.mcp_overflow:ToolResponseProcessorMiddleware
     config:
-      max_response_size: 8192
+      max_response_size: 4096
       sandbox_path: /tmp/mcp_responses/
+  - use: middlewares.code_index:CodeIndexMiddleware
+    config:
+      code_repos:
+        - name: tobias-goods-mono
+          path: /Users/bytedance/Documents/goods/fe_ls_tobias_goods_mono
 
 code_repos:
   - name: tobias-goods-mono
