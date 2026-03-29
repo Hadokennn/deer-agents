@@ -20,7 +20,10 @@ extra_middlewares:
       max_response_size: 8192
       sandbox_path: /tmp/mcp_responses/
 
-code_repos: []
+code_repos:
+  - name: tobias-goods-mono
+    path: /Users/bytedance/Documents/goods/fe_ls_tobias_goods_mono
+    languages: [typescript, tsx]
 
 knowledge_dirs:
   - ./agents/oncall/knowledge/
