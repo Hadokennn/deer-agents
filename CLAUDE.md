@@ -30,6 +30,22 @@ python scripts/trace_inspector.py detail <id> # 特定 run 的详情
 - 响应异常（太慢、内容错） → 查 trace 看 token 用量和每步耗时
 - 修改 prompt/middleware 后 → 跑 e2e + 查 trace 确认行为变化
 
+### Trace Replay（定位问题 step 并从 checkpoint 重放）
+
+```bash
+python scripts/trace_replay.py steps <thread_id>                # 展示关键 step 历史
+python scripts/trace_replay.py steps <thread_id> --all          # 展示全部 step（含 middleware）
+python scripts/trace_replay.py diagnose <thread_id>             # 自动检测异常 step
+python scripts/trace_replay.py replay <thread_id> --from-step N # 从 step N 恢复执行
+```
+
+**When to use:**
+- tool 返回 error → diagnose 自动标记，replay 从该 step 前重跑
+- 修改 prompt/tool 后 → replay 从 model step 重跑，验证行为变化
+- 不确定哪步出问题 → diagnose 自动扫描，给出建议 replay 起点
+
+**核心原理：** LangGraph 每个 step 都创建 checkpoint，replay 用 `agent.stream(None, config_with_checkpoint_id)` 从任意 checkpoint 恢复执行。
+
 ### Event 格式观察（写解析代码前必用）
 
 ```bash
