@@ -71,6 +71,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: oncall
 
 # ============================================================================
 # Tools Configuration
@@ -139,6 +140,11 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # Oncall diagnosis: Programmatic schema locator
+  - name: locate_field_schema
+    group: oncall
+    use: tools.schema_locator:locate_field_schema_tool
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)

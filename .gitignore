@@ -8,4 +8,6 @@ build/
 .claude/
 .deer-flow/
 memory.json
+extensions_config.json
 threads/
+log/

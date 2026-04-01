@@ -11,8 +11,11 @@ tool_groups:
   - file:read
   - file:write
   - bash
+  - oncall
 
-mcp_servers: []
+mcp_servers:
+  # bytedance-mcp-ace_ai (SSE) — configured in extensions_config.json
+  # Provides: ace_ai_locate_template, ace_ai_get_last_template_detail, etc.
 
 extra_middlewares:
   - use: middlewares.mcp_overflow:ToolResponseProcessorMiddleware

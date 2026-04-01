@@ -6,8 +6,8 @@
 ## Current State
 - Branch: `main`
 - Last commit: `cbd0f40 — feat: CodeIndexMiddleware — enrich code search with symbol index`
-- Uncommitted changes: none
-- Tests: 27 pass, 0 fail
+- Uncommitted: `tools/schema_locator.py` + `tests/test_schema_locator.py` + config updates
+- Tests: 47 pass, 0 fail
 
 ### 已实现的 Harness 能力
 1. **CLI Shell** — prompt_toolkit REPL，多 agent 切换（/switch），session resume（/resume）
@@ -44,6 +44,54 @@
 - schema 注入用"数据字典"（类似符号索引的思路），只把相关表 schema 注入 context
 - 混合模式：简单查询用 Text-to-SQL，复杂业务操作用现有 MCP API
 - **需要先了解**：用户的数据库类型（MySQL/PG/内部平台）、表数量、安全约束
+
+### Oncall 诊断系统完善（基于执行层 trade-off 分析）
+
+> 四种执行机制的选择标准：路径是否已知 × 中间数据是否大
+>
+> | 机制 | 驱动者 | Context 影响 | 适合场景 |
+> |------|--------|-------------|---------|
+> | CLI Tool | LLM 逐步 | 每步进 parent | 探索性、一次性操作 |
+> | Programmatic Tool | 代码一气呵成 | 只有最终结果 | 固定流程、已知路径 |
+> | Skill SOP | LLM 按步骤走 | 每步进 parent | 已知流程但需 LLM 判断 |
+> | Sub-agent | 独立 LLM | 隔离，只回传摘要 | 复杂分析、中间数据大 |
+>
+> 嵌套组合：Skill 是编排层，Programmatic Tool 和 CLI Tool 是执行层，Sub-agent 是隔离层。
+
+- [ ] **Phase 2 schema 定位** — `locate_field_schema` Programmatic Tool（✅ 已实现，待接入真实 MCP）
+  - 路径已知（MCP1→MCP2→搜索），中间数据大（schema 存文件不进 context）
+  - 类目树向上回溯（叶子→父→祖父）纯代码驱动
+  - 待办：配置 `bytedance-mcp-ace_ai` MCP server，用真实数据验证
+
+- [ ] **Phase 3 组件代码定位** — Programmatic Tool
+  - 从字段 schema 的 `x-component` 提取组件名 → grep 代码仓库
+  - 复用 `CodeIndexMiddleware` 的符号索引能力
+  - 可和 Phase 2 串成一个更大的 Programmatic Tool，或独立为 `locate_component_code`
+
+- [ ] **Phase 1-4 完整诊断流程** — Skill SOP
+  - Phase 1（解析意图）需要 LLM 判断 → Skill 步骤
+  - Phase 2 调用 `locate_field_schema` Programmatic Tool
+  - Phase 3 调用组件定位 Programmatic Tool 或 CLI grep
+  - Phase 4（综合分析）需要 LLM 推理 → Skill 步骤
+  - 如果 Phase 4 的 schema + 代码上下文过大 → 委派 Sub-agent 隔离分析
+
+- [ ] **BudgetGuardMiddleware** — before_model 预算熔断
+  - 超过 N 轮 tool call 或 token 预算 → 注入 SystemMessage 强制收敛
+  - 防止 agent 在错误方向上无限探索
+
+- [ ] **safe_bash** — 执行边界
+  - oncall agent 只需只读能力，白名单命令（grep/cat/find/git log/git blame）
+  - 工具 description 里声明限制 + 执行层硬拦截，两层都做
+
+- [ ] **ContextCompactionMiddleware** — before_model 上下文压缩
+  - 滑动窗口：最近 K 轮完整保留
+  - 窗口外 ToolMessage：已被 ToolResponseProcessor 处理的直接丢弃，未处理的做摘要
+  - 窗口外 AIMessage：保留 tool_calls，删推理文本
+  - 注意和 ToolResponseProcessorMiddleware 的两层压缩协调
+
+- [ ] **Sub-agent 程序化路由** — middleware 自动判断是否委派
+  - before_model 检测 tool response 总大小，超阈值注入指令走 sub-agent
+  - 确定性逻辑不走 LLM，不放 prompt
 
 ### 后续 backlog
 1. **代码结构图**（Code Graph） — FileEntry.imports 已提取，下一步构建 `A imports B` 依赖图，支持调用链追溯
