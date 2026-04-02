@@ -1,8 +1,9 @@
 """Schema Locator Tool — Programmatic tool for oncall field diagnosis.
 
-Chains MCP calls to locate template schema and extract field schema fragments.
+Chains MCP calls to locate template schema and extract field schema fragments,
+then locates the component source code via symbol index.
 LLM only participates at entry (intent) and exit (analysis). All intermediate
-MCP calls and data processing are code-driven — no LLM in the loop.
+MCP calls, index lookups, and data processing are code-driven — no LLM in the loop.
 
 Flow:
   1. MCP: locate_template (category_full_name + product_type → 五元组)
@@ -10,7 +11,8 @@ Flow:
   3. MCP: get_last_template_detail (五元组 → full schema)
   4. Save schema to file (NOT into context)
   5. Search for field schema fragment (recursive — groups contain fields)
-  6. Return only the relevant fragment + metadata
+  6. x-component → symbol index → component source code locations
+  7. Return field schema + code locations
 """
 
 import json
@@ -150,6 +152,30 @@ def extract_category_levels(category_full_name: str) -> list[str]:
     for i in range(len(parts), 0, -1):
         levels.append(">".join(parts[:i]))
     return levels
+
+
+def locate_component_code(component_name: str, repo_name: str = "tobias-goods-mono") -> list[dict]:
+    """Search symbol index for component source code locations.
+
+    Returns list of {name, kind, file, line, span, exported} dicts.
+    Empty list if index unavailable or no matches.
+    """
+    try:
+        from scripts.index_repo import load_index, search_index
+    except ImportError:
+        logger.warning("index_repo not available, skipping component code lookup")
+        return []
+
+    index = load_index(repo_name)
+    if not index:
+        logger.info("No symbol index for repo '%s'", repo_name)
+        return []
+
+    results = search_index(index, component_name, limit=10)
+    # Prefer component definitions (const/fn) over type definitions
+    components = [r for r in results if r["kind"] in ("const/fn", "function", "class")]
+    types = [r for r in results if r["kind"] in ("type", "interface")]
+    return components + types
 
 
 def extract_field_summary(field_schema: dict) -> dict:
@@ -483,9 +509,14 @@ class SchemaLocatorTool(BaseTool):
                 "suggestion": f"sub-agent 可 read_file({schema_path}) 查找近似字段",
             }
 
-        # --- Return structured result ---
+        # --- Step 7: Locate component source code via symbol index ---
         summary = extract_field_summary(field_result["schema"])
-        return {
+        component_name = summary.get("x_component")
+        component_code = []
+        if component_name:
+            component_code = locate_component_code(component_name)
+
+        result = {
             "status": "found",
             "config_dimension": config_dim_dict,
             "schema_path": schema_path,
@@ -494,6 +525,20 @@ class SchemaLocatorTool(BaseTool):
             "category": dim.get("category_full_name", ""),
             **summary,
         }
+
+        if component_code:
+            result["component_sources"] = [
+                {
+                    "file": c["file"],
+                    "line": c["line"],
+                    "span": c["span"],
+                    "kind": c["kind"],
+                    "exported": c["exported"],
+                }
+                for c in component_code
+            ]
+
+        return result
 
 
 # Module-level instance for config.yaml registration
