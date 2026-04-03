@@ -97,6 +97,7 @@ class DeerShell:
             checkpointer=self._checkpointer,
             model_name=self.agent_cfg.get("model"),
             thinking_enabled=self.agent_cfg.get("thinking_enabled", False),
+            subagent_enabled=self.agent_cfg.get("subagent_enabled", False),
             agent_name=self.agent_name,
         )
 

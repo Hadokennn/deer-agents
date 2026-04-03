@@ -380,24 +380,72 @@ def test_tool_overview_no_field_name(tmp_path):
     assert "商品品类" in titles
 
 
-def test_tool_sandbox_path_with_thread_id(tmp_path):
-    """When run_manager has thread_id, schema saves to sandbox outputs dir."""
+def test_tool_found_with_component_sources(tmp_path, monkeypatch):
+    """When field has x-component, component_sources are included."""
     mcp_tools = _make_mock_mcp_tools(
         locate_result=_wrap_locate_result(SAMPLE_DIM),
         detail_result=SAMPLE_DETAIL,
     )
     tool = SchemaLocatorTool(mcp_tools=mcp_tools, schema_dir=str(tmp_path))
 
-    # Simulate run_manager with thread_id in config
-    run_manager = MagicMock()
-    run_manager.config = {"configurable": {"thread_id": "test-thread-123"}}
+    # Mock locate_component_code to return fake results
+    import tools.schema_locator as sl
+    monkeypatch.setattr(sl, "locate_component_code", lambda name: (
+        "/repo/root",
+        [{"name": name, "kind": "const/fn", "file": f"src/{name}.tsx", "line": 10, "span": 20, "exported": True}],
+    ))
 
     result = tool._run(
         category_full_name="购物>果蔬生鲜>水果",
         product_type="1",
         field_name="商家名称",
-        run_manager=run_manager,
     )
+
+    assert result["status"] == "found"
+    assert result["x_component"] == "AccountName"
+    assert "component_sources" in result
+    assert len(result["component_sources"]) == 1
+    assert result["component_sources"][0]["file"] == "src/AccountName.tsx"
+
+
+def test_tool_found_no_component_when_index_empty(tmp_path, monkeypatch):
+    """No component_sources when symbol index returns nothing."""
+    mcp_tools = _make_mock_mcp_tools(
+        locate_result=_wrap_locate_result(SAMPLE_DIM),
+        detail_result=SAMPLE_DETAIL,
+    )
+    tool = SchemaLocatorTool(mcp_tools=mcp_tools, schema_dir=str(tmp_path))
+
+    import tools.schema_locator as sl
+    monkeypatch.setattr(sl, "locate_component_code", lambda name: ("", []))
+
+    result = tool._run(
+        category_full_name="购物>果蔬生鲜>水果",
+        product_type="1",
+        field_name="商家名称",
+    )
+
+    assert result["status"] == "found"
+    assert "component_sources" not in result
+
+
+def test_tool_sandbox_path_with_thread_id(tmp_path, monkeypatch):
+    """When ensure_config has thread_id, schema saves to sandbox outputs dir."""
+    mcp_tools = _make_mock_mcp_tools(
+        locate_result=_wrap_locate_result(SAMPLE_DIM),
+        detail_result=SAMPLE_DETAIL,
+    )
+    tool = SchemaLocatorTool(mcp_tools=mcp_tools, schema_dir=str(tmp_path))
+
+    # Mock ensure_config to return a config with thread_id
+    from unittest.mock import patch
+    mock_config = {"configurable": {"thread_id": "test-thread-123"}, "tags": [], "metadata": {}, "callbacks": None, "recursion_limit": 25}
+    with patch("langchain_core.runnables.ensure_config", return_value=mock_config):
+        result = tool._run(
+            category_full_name="购物>果蔬生鲜>水果",
+            product_type="1",
+            field_name="商家名称",
+        )
 
     assert result["status"] == "found"
     # schema_path should be a virtual sandbox path

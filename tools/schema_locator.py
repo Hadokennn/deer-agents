@@ -154,28 +154,29 @@ def extract_category_levels(category_full_name: str) -> list[str]:
     return levels
 
 
-def locate_component_code(component_name: str, repo_name: str = "tobias-goods-mono") -> list[dict]:
+def locate_component_code(component_name: str, repo_name: str = "tobias-goods-mono") -> tuple[str, list[dict]]:
     """Search symbol index for component source code locations.
 
-    Returns list of {name, kind, file, line, span, exported} dicts.
+    Returns (repo_root_path, results) where results is list of
+    {name, kind, file, line, span, exported} dicts.
     Empty list if index unavailable or no matches.
     """
     try:
         from scripts.index_repo import load_index, search_index
     except ImportError:
         logger.warning("index_repo not available, skipping component code lookup")
-        return []
+        return "", []
 
     index = load_index(repo_name)
     if not index:
         logger.info("No symbol index for repo '%s'", repo_name)
-        return []
+        return "", []
 
     results = search_index(index, component_name, limit=10)
     # Prefer component definitions (const/fn) over type definitions
     components = [r for r in results if r["kind"] in ("const/fn", "function", "class")]
     types = [r for r in results if r["kind"] in ("type", "interface")]
-    return components + types
+    return index.root_path, components + types
 
 
 def extract_field_summary(field_schema: dict) -> dict:
@@ -382,18 +383,21 @@ class SchemaLocatorTool(BaseTool):
                 return None
         return schema_config
 
-    def _resolve_schema_dir(self, run_manager: Any = None) -> tuple[Path, str | None]:
+    def _resolve_schema_dir(self) -> tuple[Path, str | None]:
         """Resolve where to save schema and the virtual path prefix.
 
         Returns (physical_dir, virtual_prefix_or_none).
         If thread_id is available, saves to sandbox outputs dir so sub-agents
         can access via read_file("/mnt/user-data/outputs/schemas/...").
         """
-        # Try to get thread_id from LangChain run_manager → config → configurable
+        # Get thread_id from LangGraph's context variable (set during agent execution)
         thread_id = None
-        if run_manager is not None:
-            config = getattr(run_manager, "config", None) or {}
+        try:
+            from langchain_core.runnables import ensure_config
+            config = ensure_config()
             thread_id = config.get("configurable", {}).get("thread_id")
+        except Exception:
+            pass
 
         if thread_id:
             # Save to thread's outputs dir → accessible via /mnt/user-data/outputs/
@@ -411,7 +415,6 @@ class SchemaLocatorTool(BaseTool):
         field_name: str = "",
         product_type: str = "",
         product_sub_type: str = "",
-        run_manager: Any = None,
     ) -> dict:
         """Execute the Programmatic tool chain.
 
@@ -472,7 +475,7 @@ class SchemaLocatorTool(BaseTool):
 
         # --- Step 5: Save to file (NOT into context) ---
         config_dim_dict = build_config_dimension(dim)
-        physical_dir, virtual_prefix = self._resolve_schema_dir(run_manager)
+        physical_dir, virtual_prefix = self._resolve_schema_dir()
         physical_path = save_schema_to_file(config_dim_dict, schema_config, physical_dir)
         filename = physical_path.name
 
@@ -512,9 +515,10 @@ class SchemaLocatorTool(BaseTool):
         # --- Step 7: Locate component source code via symbol index ---
         summary = extract_field_summary(field_result["schema"])
         component_name = summary.get("x_component")
-        component_code = []
+        repo_root = ""
+        code_results: list[dict] = []
         if component_name:
-            component_code = locate_component_code(component_name)
+            repo_root, code_results = locate_component_code(component_name)
 
         result = {
             "status": "found",
@@ -526,7 +530,7 @@ class SchemaLocatorTool(BaseTool):
             **summary,
         }
 
-        if component_code:
+        if code_results:
             result["component_sources"] = [
                 {
                     "file": c["file"],
@@ -535,8 +539,51 @@ class SchemaLocatorTool(BaseTool):
                     "kind": c["kind"],
                     "exported": c["exported"],
                 }
-                for c in component_code
+                for c in code_results
             ]
+            if repo_root:
+                result["code_repo_root"] = repo_root
+
+        # --- Step 8: Build sub-agent prompt material ---
+        import json as _json
+        schema_summary = _json.dumps({
+            "field_key": field_result["key"],
+            "group": field_result["group"],
+            **summary,
+        }, ensure_ascii=False, indent=2)
+
+        code_section = ""
+        if code_results and repo_root:
+            code_lines = [f"代码仓库根目录: {repo_root}"]
+            for c in code_results:
+                code_lines.append(
+                    f"  {c['kind']} {repo_root}/{c['file']}:{c['line']} ({c['span']} lines)"
+                )
+            code_section = "\n".join(code_lines)
+
+        result["next_action"] = (
+            "请使用 task 工具委派 sub-agent 分析。将以下内容完整复制到 sub-agent prompt 中：\n\n"
+            "--- sub-agent prompt 开始 ---\n"
+            "## 任务\n"
+            "分析用户反馈的字段问题，给出根因和解决建议。\n\n"
+            "## 字段 schema 配置（已提取，无需再查）\n"
+            f"```json\n{schema_summary}\n```\n\n"
+            f"全量 schema 文件（必要时 read_file 查看其他字段）：{schema_path}\n\n"
+        )
+        if code_section:
+            result["next_action"] += (
+                "## 组件源码位置\n"
+                f"{code_section}\n\n"
+            )
+        result["next_action"] += (
+            "## 操作指南\n"
+            "- 字段 schema 已在上方，直接分析 reaction_rules、x-hidden、required、分组条件\n"
+            "- 必须使用 bash(\"cat <完整路径>\") 读组件源码分析运行时逻辑，综合 schema 和 代码运行时逻辑 进行分析\n"
+            "- 不要调用 read_file 读源码（源码不在沙箱内）\n"
+            "- 不要调用 locate_field_schema（已经查过了）\n"
+            "- 如需查看关联字段，用 read_file 读全量 schema 文件搜索对应字段名\n"
+            "--- sub-agent prompt 结束 ---"
+        )
 
         return result
 

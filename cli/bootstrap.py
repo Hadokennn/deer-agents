@@ -1,10 +1,13 @@
 # cli/bootstrap.py
 """Shared bootstrap — load config, resolve paths, setup checkpointer."""
 
+import logging
 import os
 from pathlib import Path
 
 from cli.app import PROJECT_ROOT, load_global_config
+
+LOG_PATH = PROJECT_ROOT / ".deer-flow" / "cli.log"
 
 
 def setup_env():
@@ -12,6 +15,34 @@ def setup_env():
     from dotenv import load_dotenv
     load_dotenv(PROJECT_ROOT / "deer-flow" / ".env")
     os.environ.setdefault("DEER_FLOW_CONFIG_PATH", str(PROJECT_ROOT / "deer-flow" / "config.yaml"))
+
+
+def setup_logging(verbose: bool = False):
+    """Configure logging to file + optional stderr.
+
+    Always writes to .deer-flow/cli.log (DEBUG level).
+    With verbose=True, also logs WARNING+ to stderr.
+    """
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # File handler — always on, captures everything
+    fh = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    root.addHandler(fh)
+
+    # Stderr handler — only with verbose
+    if verbose:
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.WARNING)
+        sh.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+        root.addHandler(sh)
 
 
 def get_checkpointer_path() -> Path:

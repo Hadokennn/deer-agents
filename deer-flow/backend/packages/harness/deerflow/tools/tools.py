@@ -66,6 +66,14 @@ def get_available_tools(
 
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
+        # task_tool is async-only; patch with sync wrapper so it works
+        # in synchronous agent loops (e.g. DeerFlowClient.stream()).
+        # Same approach as MCP tools in deerflow.mcp.tools.
+        from deerflow.mcp.tools import _make_sync_tool_wrapper
+
+        for t in SUBAGENT_TOOLS:
+            if getattr(t, "func", None) is None and getattr(t, "coroutine", None) is not None:
+                t.func = _make_sync_tool_wrapper(t.coroutine, t.name)
         builtin_tools.extend(SUBAGENT_TOOLS)
         logger.info("Including subagent tools (task)")
 

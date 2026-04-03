@@ -23,6 +23,9 @@ def main():
     )
     args = parser.parse_args()
 
+    from cli.bootstrap import setup_logging
+    setup_logging(verbose=args.verbose)
+
     from cli.shell import DeerShell
     shell = DeerShell(agent_name=args.agent, verbose=args.verbose)
     shell.run()
