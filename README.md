@@ -113,7 +113,21 @@ deer-agents/
 │   └── bootstrap.py          ← 共享初始化（env、checkpointer 路径）
 ├── middlewares/
 │   └── mcp_overflow.py       ← 自定义 middleware 示例
+├── evals/
+│   ├── framework/            ← 评测框架（agent 无关）
+│   │   ├── types.py          ← EvalCase / EvalResult / EvalReport
+│   │   ├── runner.py         ← 加载 case、调度 scorer、聚合结果
+│   │   └── report.py         ← 控制台 + JSON 报告输出
+│   └── oncall/               ← oncall agent 评测（首个实现）
+│       ├── fixtures.py       ← 共享 mock 数据
+│       ├── tool_cases.json   ← Layer 1 mock 回归 5 case
+│       ├── tool_cases_live.json ← Layer 1 live 真实 MCP 3 case
+│       ├── tool_eval.py      ← Layer 1 scorer (mock + live)
+│       ├── e2e_cases.json    ← Layer 3 端到端 case
+│       ├── e2e_eval.py       ← Layer 3 scorer (跑真实 agent)
+│       └── process_eval.py   ← 启发式规则（被 e2e_eval 复用）
 ├── scripts/
+│   ├── run_eval.py           ← 评测 CLI 入口
 │   ├── e2e_test.py           ← 端到端验证
 │   ├── trace_inspector.py    ← LangSmith trace 查看
 │   ├── trace_replay.py       ← checkpoint 诊断 + 重放
@@ -138,6 +152,76 @@ deer-agents/
 | `/diagnose` | 自动检测异常 step |
 | `/help` | 帮助 |
 | `/exit` | 退出 |
+
+## 评测体系
+
+两层评测，mock 和 live 分开：
+
+| 命令 | 模式 | 评什么 | 速度 |
+|------|------|--------|------|
+| `run_eval.py tool` | Mock | 工具逻辑有没有改坏（回归） | 秒级 |
+| `run_eval.py tool --live` | Live | 真实 MCP 返回是否正确 | 分钟级 |
+| `run_eval.py e2e` | Live | 跑完整 agent → 评过程 + 结论 | 分钟级 |
+
+Layer 1 (Tool) 两种模式：mock 测逻辑，live 测真实 API。Layer 3 (E2E) 天然 live — 跑真实 agent pipeline，同时评过程（启发式规则：调了哪些 tool、token 用量、步骤数）和结论（输出是否包含关键信息）。
+
+没有独立的 Layer 2 — 过程评分并入 E2E，因为评旧 transcript 测不出代码改动是否有效。
+
+### 运行评测
+
+```bash
+# Layer 1 mock（每次改代码必跑，秒级）
+python scripts/run_eval.py tool
+
+# Layer 1 live（打真实 MCP，验证 API 集成）
+python scripts/run_eval.py tool --live
+
+# Layer 3 E2E（跑完整 agent，评过程 + 结论）
+python scripts/run_eval.py e2e
+
+# 过滤 & 保存
+python scripts/run_eval.py tool --tag fallback
+python scripts/run_eval.py tool --case happy_path_field_found
+python scripts/run_eval.py tool --save       # JSON 报告 → .deer-flow/eval-reports/
+python scripts/run_eval.py all               # tool + e2e 全跑
+```
+
+### Layer 1 Mock Case（5 个冷启动）
+
+| Case | 场景 | 覆盖 |
+|------|------|------|
+| `happy_path_field_found` | 三级类目直接命中，字段精确匹配 | 正常流程 |
+| `category_fallback` | 叶子节点无模板，父级回退 | 容错路径 |
+| `ambiguous_template` | 同类目多个模板，需用户确认 | 歧义处理 |
+| `field_not_found` | 字段不在 schema 中 | 空结果处理 |
+| `cross_concern_with_code` | schema + 组件代码联合定位 | 跨关注点 |
+
+### Layer 1 Live Case（3 个）
+
+| Case | 场景 | 断言类型 |
+|------|------|---------|
+| `live_overview` | 真实类目概览 | 结构性（status=overview, field_count>0） |
+| `live_field_found` | 真实字段定位 | 结构性（status=found, 有 field_key） |
+| `live_not_found` | 虚构类目 | 结构性（status=not_found） |
+
+### Layer 3 E2E Case（2 个冷启动）
+
+| Case | 场景 | 评分 |
+|------|------|------|
+| `e2e_field_diagnosis` | 字段 schema 诊断 | 过程：调了 locate_field_schema + 结论：有内容 |
+| `e2e_overview_request` | 模板字段概览 | 过程：调了 tool + 结论：有响应 |
+
+### 添加新 Agent 评测
+
+```bash
+mkdir -p evals/review
+# 创建: evals/review/tool_cases.json + evals/review/tool_eval.py
+python scripts/run_eval.py tool --agent review
+```
+
+### Regression 策略
+
+每次修 bug → 加一个 case 到 `*_cases.json`。改代码后跑 `python scripts/run_eval.py tool`，新旧 case 都 PASS 才没改坏。
 
 ## DeerFlow 同步
 

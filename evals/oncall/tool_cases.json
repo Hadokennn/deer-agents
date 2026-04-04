@@ -1,0 +1,83 @@
+[
+  {
+    "id": "happy_path_field_found",
+    "layer": "tool",
+    "tags": ["cold-start", "happy-path"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1",
+      "field_name": "商家名称",
+      "mock": "single_locate"
+    },
+    "expected": {
+      "status": "found",
+      "field_key": "accountName",
+      "group": "merchantInfo",
+      "x_component": "AccountName",
+      "has_reaction_rules": true
+    }
+  },
+  {
+    "id": "category_fallback",
+    "layer": "tool",
+    "tags": ["cold-start", "fallback"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1",
+      "field_name": "商家名称",
+      "mock": "fallback_locate"
+    },
+    "expected": {
+      "status": "found",
+      "category": "购物>果蔬生鲜",
+      "field_key": "accountName",
+      "locate_call_count": 2
+    }
+  },
+  {
+    "id": "ambiguous_template",
+    "layer": "tool",
+    "tags": ["cold-start", "ambiguous"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "field_name": "any",
+      "mock": "ambiguous_locate"
+    },
+    "expected": {
+      "status": "ambiguous",
+      "candidates_count": 2
+    }
+  },
+  {
+    "id": "field_not_found",
+    "layer": "tool",
+    "tags": ["cold-start", "not-found"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1",
+      "field_name": "不存在的字段",
+      "mock": "single_locate"
+    },
+    "expected": {
+      "status": "field_not_found",
+      "has_available_fields": true
+    }
+  },
+  {
+    "id": "cross_concern_with_code",
+    "layer": "tool",
+    "tags": ["cold-start", "cross-concern"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1",
+      "field_name": "商家名称",
+      "mock": "single_locate",
+      "mock_component_code": true
+    },
+    "expected": {
+      "status": "found",
+      "has_component_sources": true,
+      "has_next_action": true
+    }
+  }
+]

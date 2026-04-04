@@ -1,0 +1,44 @@
+[
+  {
+    "id": "live_overview",
+    "layer": "tool",
+    "tags": ["live", "overview"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1"
+    },
+    "expected": {
+      "status": "overview",
+      "field_count_min": 1,
+      "has_schema_path": true
+    }
+  },
+  {
+    "id": "live_field_found",
+    "layer": "tool",
+    "tags": ["live", "happy-path"],
+    "input": {
+      "category_full_name": "购物>果蔬生鲜>水果",
+      "product_type": "1",
+      "field_name": "商品品类"
+    },
+    "expected": {
+      "status": "found",
+      "has_field_key": true,
+      "has_schema_path": true
+    }
+  },
+  {
+    "id": "live_not_found",
+    "layer": "tool",
+    "tags": ["live", "not-found"],
+    "input": {
+      "category_full_name": "完全不存在的假类目>虚构的子类目",
+      "product_type": "1",
+      "field_name": "任意字段"
+    },
+    "expected": {
+      "status": "not_found"
+    }
+  }
+]

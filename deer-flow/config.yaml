@@ -35,9 +35,9 @@ token_usage:
 
 models:
   - name: kimi-k2.5
-    display_name: Kimi K2.5
+    display_name: Kimi
     use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-    model: kimi-k2.5
+    model: kimi-k2-thinking
     api_base: https://api.moonshot.cn/v1
     api_key: $MOONSHOT_API_KEY
     max_tokens: 32768
