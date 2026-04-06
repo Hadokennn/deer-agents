@@ -2,7 +2,7 @@
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from summarization.compression_strategies import (
+from middlewares.summarization.compression_strategies import (
     CompressionConfig,
     compress_message,
 )

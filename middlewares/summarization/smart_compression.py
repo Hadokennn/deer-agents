@@ -20,8 +20,8 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from summarization.compression_archive import archive_messages
-from summarization.compression_strategies import CompressionConfig, compress_message
+from middlewares.summarization.compression_archive import archive_messages
+from middlewares.summarization.compression_strategies import CompressionConfig, compress_message
 
 logger = logging.getLogger(__name__)
 

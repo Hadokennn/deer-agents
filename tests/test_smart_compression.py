@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from summarization.smart_compression import SmartCompressionMiddleware
+from middlewares.summarization.smart_compression import SmartCompressionMiddleware
 
 
 def _make_state(messages, compressed_messages=None):

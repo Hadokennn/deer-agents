@@ -4,7 +4,7 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from summarization.compression_archive import archive_messages, read_archived_messages
+from middlewares.summarization.compression_archive import archive_messages, read_archived_messages
 
 
 def test_archive_creates_jsonl(tmp_path):

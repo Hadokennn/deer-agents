@@ -91,8 +91,8 @@ def _create_summarization_middleware() -> AgentMiddleware | None:  # type: ignor
 
 def _create_smart_compression_middleware(config):
     """Create SmartCompressionMiddleware from SummarizationConfig."""
-    from summarization.compression_strategies import CompressionConfig
-    from summarization.smart_compression import SmartCompressionMiddleware
+    from middlewares.summarization.compression_strategies import CompressionConfig
+    from middlewares.summarization.smart_compression import SmartCompressionMiddleware
 
     trigger = []
     if config.trigger is not None:
