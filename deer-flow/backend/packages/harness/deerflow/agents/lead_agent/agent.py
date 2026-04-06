@@ -38,12 +38,21 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     return default_model_name
 
 
-def _create_summarization_middleware() -> SummarizationMiddleware | None:
-    """Create and configure the summarization middleware from config."""
+def _create_summarization_middleware() -> AgentMiddleware | None:  # type: ignore[type-arg]
+    """Create and configure the summarization middleware from config.
+
+    When use_smart_compression=True, returns SmartCompressionMiddleware instead.
+    """
     config = get_summarization_config()
 
     if not config.enabled:
         return None
+
+    # --- Smart compression switch ---
+    if config.use_smart_compression:
+        return _create_smart_compression_middleware(config)
+
+    # --- Original SummarizationMiddleware (default) ---
 
     # Prepare trigger parameter
     trigger = None
@@ -78,6 +87,37 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
         kwargs["summary_prompt"] = config.summary_prompt
 
     return SummarizationMiddleware(**kwargs)
+
+
+def _create_smart_compression_middleware(config):
+    """Create SmartCompressionMiddleware from SummarizationConfig."""
+    from summarization.compression_strategies import CompressionConfig
+    from summarization.smart_compression import SmartCompressionMiddleware
+
+    trigger = []
+    if config.trigger is not None:
+        triggers = config.trigger if isinstance(config.trigger, list) else [config.trigger]
+        trigger = [t.to_tuple() for t in triggers]
+
+    keep = config.keep.to_tuple()
+
+    compression_config = CompressionConfig(
+        tool_message_threshold=config.compression.tool_message_threshold,
+        tool_truncate_head=config.compression.tool_truncate_head,
+        tool_truncate_tail=config.compression.tool_truncate_tail,
+    )
+
+    model = None
+    model_name = config.compression.ai_summary_model or config.model_name
+    if model_name:
+        model = create_chat_model(name=model_name, thinking_enabled=False)
+
+    return SmartCompressionMiddleware(
+        trigger=trigger,
+        keep=keep,
+        compression_config=compression_config,
+        model=model,
+    )
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:

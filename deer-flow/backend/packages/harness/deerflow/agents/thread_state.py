@@ -45,6 +45,17 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     return {**existing, **new}
 
 
+def merge_compressed_messages(
+    existing: dict[str, dict] | None, new: dict[str, dict] | None
+) -> dict[str, dict]:
+    """Reducer for compressed_messages — merge new archive pointers into existing."""
+    if existing is None:
+        return new or {}
+    if new is None:
+        return existing
+    return {**existing, **new}
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -53,3 +64,4 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    compressed_messages: Annotated[dict[str, dict], merge_compressed_messages]  # msg_id -> {"line": N}

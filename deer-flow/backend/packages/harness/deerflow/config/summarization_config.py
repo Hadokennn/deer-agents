@@ -18,6 +18,15 @@ class ContextSize(BaseModel):
         return (self.type, self.value)
 
 
+class CompressionSettings(BaseModel):
+    """Settings for SmartCompressionMiddleware (only when use_smart_compression=True)."""
+
+    tool_message_threshold: int = Field(default=2048, description="Bytes threshold for ToolMessage compression")
+    tool_truncate_head: int = Field(default=500, description="Bytes to keep from start of truncated ToolMessage")
+    tool_truncate_tail: int = Field(default=200, description="Bytes to keep from end of truncated ToolMessage")
+    ai_summary_model: str | None = Field(default=None, description="Model for AI text summarization (None = use summarization model)")
+
+
 class SummarizationConfig(BaseModel):
     """Configuration for automatic conversation summarization."""
 
@@ -50,6 +59,14 @@ class SummarizationConfig(BaseModel):
     summary_prompt: str | None = Field(
         default=None,
         description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",
+    )
+    use_smart_compression: bool = Field(
+        default=False,
+        description="Use SmartCompressionMiddleware instead of default SummarizationMiddleware",
+    )
+    compression: CompressionSettings = Field(
+        default_factory=CompressionSettings,
+        description="Settings for SmartCompressionMiddleware (only when use_smart_compression=True)",
     )
 
 
