@@ -389,6 +389,9 @@ class SchemaLocatorTool(BaseTool):
         Returns (physical_dir, virtual_prefix_or_none).
         If thread_id is available, saves to sandbox outputs dir so sub-agents
         can access via read_file("/mnt/user-data/outputs/schemas/...").
+
+        Uses DeerFlow's Paths system so the physical path matches what the
+        sandbox read_file tool resolves for /mnt/user-data/outputs/.
         """
         # Get thread_id from LangGraph's context variable (set during agent execution)
         thread_id = None
@@ -400,8 +403,12 @@ class SchemaLocatorTool(BaseTool):
             pass
 
         if thread_id:
-            # Save to thread's outputs dir → accessible via /mnt/user-data/outputs/
-            outputs_dir = Path(f".deer-flow/threads/{thread_id}/user-data/outputs")
+            try:
+                from deerflow.config.paths import get_paths
+                outputs_dir = get_paths().sandbox_outputs_dir(thread_id)
+            except ImportError:
+                # Fallback if deerflow not available (shouldn't happen in agent runtime)
+                outputs_dir = Path(f".deer-flow/threads/{thread_id}/user-data/outputs")
             schema_dir = outputs_dir / SANDBOX_OUTPUTS_SCHEMA_DIR
             virtual_prefix = f"{VIRTUAL_OUTPUTS_PREFIX}/{SANDBOX_OUTPUTS_SCHEMA_DIR}"
             return schema_dir, virtual_prefix
@@ -552,36 +559,64 @@ class SchemaLocatorTool(BaseTool):
             **summary,
         }, ensure_ascii=False, indent=2)
 
-        code_section = ""
+        # Build bash commands for reading component source code
+        # Symbol index has line + span → read only the definition, not the whole file.
+        # Hooks/utils are typically small, so cat the whole file.
+        bash_commands = []
         if code_results and repo_root:
-            code_lines = [f"代码仓库根目录: {repo_root}"]
-            for c in code_results:
-                code_lines.append(
-                    f"  {c['kind']} {repo_root}/{c['file']}:{c['line']} ({c['span']} lines)"
+            impl_files = [c for c in code_results if c["kind"] in ("const/fn", "function", "class")]
+            seen_dirs: set[str] = set()
+            for c in impl_files[:3]:
+                full_path = f"{repo_root}/{c['file']}"
+                start = max(1, c["line"] - 5)  # 5 lines context before
+                end = c["line"] + c["span"] + 5  # 5 lines context after
+                bash_commands.append(
+                    f'bash("读取 {c["file"]}:{c["line"]} 的组件定义", '
+                    f'"sed -n \'{start},{end}p\' {full_path}")'
                 )
-            code_section = "\n".join(code_lines)
+                # Scan sibling hooks/utils — key business logic lives here
+                comp_dir = Path(full_path).parent
+                if str(comp_dir) not in seen_dirs:
+                    seen_dirs.add(str(comp_dir))
+                    for subdir in ("hooks", "utils"):
+                        sub_path = comp_dir / subdir
+                        if sub_path.is_dir():
+                            for f in sorted(sub_path.glob("*.ts"))[:3]:
+                                bash_commands.append(f'bash("读取 {f.name}", "cat {f}")')
+                            for f in sorted(sub_path.glob("*.tsx"))[:3]:
+                                bash_commands.append(f'bash("读取 {f.name}", "cat {f}")')
 
         result["next_action"] = (
             "请使用 task 工具委派 sub-agent 分析。将以下内容完整复制到 sub-agent prompt 中：\n\n"
             "--- sub-agent prompt 开始 ---\n"
             "## 任务\n"
             "分析用户反馈的字段问题，给出根因和解决建议。\n\n"
-            "## 字段 schema 配置（已提取，无需再查）\n"
-            f"```json\n{schema_summary}\n```\n\n"
-            f"全量 schema 文件（必要时 read_file 查看其他字段）：{schema_path}\n\n"
         )
-        if code_section:
+
+        # Step 1: Read source code FIRST (if available)
+        if bash_commands:
             result["next_action"] += (
-                "## 组件源码位置\n"
-                f"{code_section}\n\n"
+                "## 第一步：读取组件源码（必须执行，不可跳过）\n"
+                "依次执行以下命令，读取源码后再进行分析：\n"
+                + "\n".join(bash_commands) + "\n\n"
             )
+
+        # Step 2: Schema data for reference
         result["next_action"] += (
-            "## 操作指南\n"
-            "- 字段 schema 已在上方，直接分析 reaction_rules、x-hidden、required、分组条件\n"
-            "- 必须使用 bash(\"cat <完整路径>\") 读组件源码分析运行时逻辑，综合 schema 和 代码运行时逻辑 进行分析\n"
-            "- 不要调用 read_file 读源码（源码不在沙箱内）\n"
+            "## 第二步：结合 schema 配置分析\n"
+            "### 字段 schema 配置（已提取，无需再查）\n"
+            f"```json\n{schema_summary}\n```\n\n"
+            f"全量 schema 文件（必要时 read_file 查看关联字段）：{schema_path}\n\n"
+            "### 分析要点\n"
+            "- 分析 reaction_rules、x-hidden、required、分组条件\n"
+            "- 结合第一步读到的组件源码，分析运行时显隐逻辑\n"
+            "- 综合 schema 配置 + 代码运行时逻辑 给出根因\n\n"
+        )
+
+        result["next_action"] += (
+            "## 禁止事项\n"
             "- 不要调用 locate_field_schema（已经查过了）\n"
-            "- 如需查看关联字段，用 read_file 读全量 schema 文件搜索对应字段名\n"
+            "- 不要跳过第一步直接分析（没有源码的分析是不完整的）\n"
             "--- sub-agent prompt 结束 ---"
         )
 

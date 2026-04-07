@@ -15,6 +15,9 @@ def setup_env():
     from dotenv import load_dotenv
     load_dotenv(PROJECT_ROOT / "deer-flow" / ".env")
     os.environ.setdefault("DEER_FLOW_CONFIG_PATH", str(PROJECT_ROOT / "deer-flow" / "config.yaml"))
+    ext_path = PROJECT_ROOT / "extensions_config.json"
+    if ext_path.exists():
+        os.environ.setdefault("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(ext_path))
 
 
 def setup_logging(verbose: bool = False):

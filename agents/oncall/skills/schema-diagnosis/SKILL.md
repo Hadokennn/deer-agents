@@ -78,23 +78,39 @@ locate_field_schema(
 - 需要对比全量 schema 中多个字段（超过 3 个）的配置
 - 不确定问题根因，需要更深入分析
 
-委派方式：
-```
-task(
-  description="分析商品模板 schema 配置问题",
-  prompt="用户问题：{用户原始问题}\n\n已定位到模板 schema 文件：{schema_path}\n\n请读取该文件，分析以下字段的配置：{相关字段列表}\n\n重点关注：reaction_rules（显隐条件）、validator_rules（校验规则）、x-component-props（组件属性）",
-  subagent_type="general-purpose"
-)
-```
+委派方式：直接将 `locate_field_schema` 返回的 `next_action` 字段内容作为 task prompt。`next_action` 已包含完整的 sub-agent prompt（源码读取命令、schema 数据、分析要点）。
 
-**sub-agent prompt 要包含：**
-1. 用户原始问题
-2. schema 文件路径（`schema_path`）
-3. 需要关注的字段列表
-4. 分析重点（显隐/校验/组件行为）
+## Step 4: 评估 sub-agent 结果并决策
+
+Sub-agent 负责执行（读代码、分析 schema），lead agent 负责**感知和决策**。
+
+### 评估 sub-agent 输出
+
+收到 sub-agent 结果后，检查以下三点：
+
+1. **是否读了源码？** — 结果中是否包含具体的代码片段引用（函数名、行号、逻辑描述），而非"可能"、"推测"等措辞
+2. **根因是否明确？** — 是否指出了具体原因（如"组件 X 在 app.tsx:25 行判断了 platform === 'pc'"），而非泛泛的"可能是平台差异"
+3. **证据链是否完整？** — schema 配置 + 代码逻辑是否对得上，能否解释用户看到的现象
+
+### 决策
+
+| 评估结果 | 行动 |
+|----------|------|
+| 三点都满足 | **直接呈现**：整理 sub-agent 的分析，格式化输出给用户 |
+| 缺源码分析（sub-agent 没读到代码或只是推测）| **针对性补充**：自己用 bash 读 sub-agent 没读到的那几个文件，补充代码分析 |
+| 根因不明确 | **追问 sub-agent**：再派一次 task，缩小范围，指定要分析的具体文件和问题 |
+| schema 数据不够 | **针对性补充**：read_file 读全量 schema 中缺失的关联字段，补充后自己给结论 |
+
+**关键原则：不要全盘重做。** sub-agent 已经做过的工作（已读的文件、已分析的配置）不要重复。只补充缺失的部分。
+
+### 输出格式
+1. 问题根因（1-2 句话说清楚）
+2. 关键证据（schema 配置 + 代码逻辑，引用具体的字段配置和代码位置）
+3. 解决建议（具体可操作的步骤）
 
 ## 重要注意事项
 
 - 五元组信息不确定时**必须问用户**，不要假设
 - `locate_field_schema` 已经把全量 schema 存到了 `schema_path`，sub-agent 可以直接 `read_file` 读取
 - 全量 schema 通常 100KB+，**绝对不要**把全量 schema 放进对话上下文
+- sub-agent 已经做过的工作不要重复，只针对性补充缺失的部分

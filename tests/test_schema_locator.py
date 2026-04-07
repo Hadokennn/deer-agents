@@ -430,17 +430,25 @@ def test_tool_found_no_component_when_index_empty(tmp_path, monkeypatch):
 
 
 def test_tool_sandbox_path_with_thread_id(tmp_path, monkeypatch):
-    """When ensure_config has thread_id, schema saves to sandbox outputs dir."""
+    """When ensure_config has thread_id, schema saves to Paths-resolved outputs dir."""
     mcp_tools = _make_mock_mcp_tools(
         locate_result=_wrap_locate_result(SAMPLE_DIM),
         detail_result=SAMPLE_DETAIL,
     )
     tool = SchemaLocatorTool(mcp_tools=mcp_tools, schema_dir=str(tmp_path))
 
-    # Mock ensure_config to return a config with thread_id
-    from unittest.mock import patch
+    from unittest.mock import patch, MagicMock
     mock_config = {"configurable": {"thread_id": "test-thread-123"}, "tags": [], "metadata": {}, "callbacks": None, "recursion_limit": 25}
-    with patch("langchain_core.runnables.ensure_config", return_value=mock_config):
+
+    # Mock get_paths() so files land in tmp_path (matching real Paths resolution)
+    mock_paths = MagicMock()
+    expected_outputs = tmp_path / "threads" / "test-thread-123" / "user-data" / "outputs"
+    mock_paths.sandbox_outputs_dir.return_value = expected_outputs
+
+    with (
+        patch("langchain_core.runnables.ensure_config", return_value=mock_config),
+        patch("deerflow.config.paths.get_paths", return_value=mock_paths),
+    ):
         result = tool._run(
             category_full_name="购物>果蔬生鲜>水果",
             product_type="1",
@@ -450,15 +458,11 @@ def test_tool_sandbox_path_with_thread_id(tmp_path, monkeypatch):
     assert result["status"] == "found"
     # schema_path should be a virtual sandbox path
     assert result["schema_path"].startswith("/mnt/user-data/outputs/schemas/")
-    # Physical file should exist in thread outputs dir
-    physical = Path(f".deer-flow/threads/test-thread-123/user-data/outputs/schemas/")
+    # Physical file should exist in the Paths-resolved outputs dir
+    physical = expected_outputs / "schemas"
     assert physical.exists()
     schema_files = list(physical.glob("*.json"))
     assert len(schema_files) == 1
-
-    # Cleanup
-    import shutil
-    shutil.rmtree(".deer-flow/threads/test-thread-123", ignore_errors=True)
 
 
 def test_tool_category_fallback(tmp_path):

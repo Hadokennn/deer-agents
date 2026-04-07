@@ -198,8 +198,18 @@ def _evaluate_mock(case: EvalCase, tmp_dir: Path) -> EvalResult:
 
 def _evaluate_live(case: EvalCase, tmp_dir: Path) -> EvalResult:
     """Run with real MCP server — no mocks."""
+    import os
+
+    from cli.app import PROJECT_ROOT
     from cli.bootstrap import setup_env
+
     setup_env()
+    # DeerFlow resolves extensions_config.json relative to its package install path,
+    # not CWD. Pin it explicitly so MCP tools can be discovered.
+    if not os.environ.get("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+        ext_path = PROJECT_ROOT / "extensions_config.json"
+        if ext_path.exists():
+            os.environ["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] = str(ext_path)
 
     start = time.monotonic()
     try:

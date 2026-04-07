@@ -167,6 +167,7 @@ tool_search:
 # Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: true
 
 skills:
   # Path to skills directory on the host (relative to project root or absolute)
