@@ -29,6 +29,13 @@ extra_middlewares:
       code_repos:
         - name: tobias-goods-mono
           path: /Users/bytedance/Documents/goods/fe_ls_tobias_goods_mono
+  - use: middlewares.knowledge:KnowledgeMiddleware
+    config:
+      knowledge_path: agents/oncall/knowledge.json
+      score_threshold: 7
+      max_inject_patterns: 3
+      extract_model: null
+      max_extract_tokens: 8000
 
 code_repos:
   - name: tobias-goods-mono
@@ -41,3 +48,6 @@ knowledge_dirs:
 skills_dir: ./agents/oncall/skills/
 
 prompt: ./agents/oncall/prompt.md
+
+memory:
+  enabled: false
