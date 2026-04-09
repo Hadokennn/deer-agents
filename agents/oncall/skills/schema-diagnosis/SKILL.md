@@ -1,6 +1,6 @@
 ---
 name: schema-diagnosis
-description: 定位商品模板 schema 配置问题。引导澄清五元组，调用 locate_field_schema 定位字段，决定直接分析或委派 sub-agent。
+description: 定位商品模板 schema 配置问题。引导澄清五元组，调用 locate_field_schema 定位字段，决定直接分析或委派 sub-agent。Use when：用户反馈表单字段不显示、选项缺失、校验报错、组件行为异常，用户提到"模板"、"配置"、"schema"、"字段"、"组件"等关键词，需要查看某个类目/商品类型下字段的配置详情。
 allowed-tools:
   - locate_field_schema
   - task
@@ -39,7 +39,7 @@ allowed-tools:
 2. 匹配不上 `product_sub_type` 再匹配 `product_type`，如"团购"→ `1`
 3. 都匹配不上就只传 `category_full_name`，让 `locate_template` 返回所有匹配
 
-**可选：**
+**尽量拿到：**
 - `field_name` — 用户关心的具体字段名称（标题、key、组件名均可）
 
 ## Step 2: 调用 locate_field_schema
@@ -50,11 +50,17 @@ allowed-tools:
 locate_field_schema(
   category_full_name="购物>果蔬生鲜>水果",
   product_type="1",          # 如果匹配到了才传
-  field_name="商家名称"       # 如果用户指定了才传
+  field_name="商家名称"       # 用户提到了具体字段就传（见下方规则）
 )
 ```
 
-**关键：不传的参数不要传空字符串，直接不传。**
+**field_name 提取规则：** 用户消息中提到的字段标题、key、组件名都算 field_name。例如：
+- "【商家平台商品ID】字段不显示" → `field_name="商家平台商品ID"`
+- "outId 配置有问题" → `field_name="outId"`
+- "价格怎么不对" → `field_name="价格"`
+- "模板配置有问题"（未提具体字段）→ 不传 field_name
+
+**关键：不传的参数不要传空字符串，直接不传。传了 field_name 才能定位到具体字段，否则只返回全字段概览。**
 
 处理返回结果：
 - `status: "found"` → 进入 Step 3
@@ -63,22 +69,20 @@ locate_field_schema(
 - `status: "field_not_found"` → 展示 `available_fields` 列表，让用户确认字段名
 - `status: "schema_error"` → 报告错误，检查 MCP 连接
 
-## Step 3: 分析结果 — 直接回答 or 委派 sub-agent
+## Step 3: 委派 sub-agent 分析
 
-**判断规则：**
+**强制规则：当 `locate_field_schema` 返回包含 `next_action` 字段时，必须使用 `task` 工具委派 sub-agent。不要自己分析。**
 
-### 直接分析（返回字段 ≤ 3 个）
-如果 `locate_field_schema` 返回了 `status: "found"` 且字段信息清晰：
-- 直接根据返回的 `reaction_rules`、`validator_rules`、`x_component_props` 等分析问题原因
-- 结合用户描述给出结论
+> 这不是并行分解，而是 **context 隔离**——源码分析会产生大量输出，必须隔离到 sub-agent 中，避免污染 lead agent 的上下文。即使只有 1 个任务，也必须委派。
 
-### 委派 sub-agent（以下任一条件成立）
-- 用户问题涉及**多个字段的联动关系**
-- 返回的 schema 片段包含复杂的 `reaction_rules` 需要交叉分析
-- 需要对比全量 schema 中多个字段（超过 3 个）的配置
-- 不确定问题根因，需要更深入分析
+**委派方式：**
+1. 使用 `task` 工具，**subagent_type 指定为 `"code-analyst"`**
+2. 将 `next_action` 字段的完整内容作为 task 的 prompt
+3. 不要修改、截断、或省略 `next_action` 的内容
 
-委派方式：直接将 `locate_field_schema` 返回的 `next_action` 字段内容作为 task prompt。`next_action` 已包含完整的 sub-agent prompt（源码读取命令、schema 数据、分析要点）。
+**不需要委派的情况（仅当 `next_action` 不存在时）：**
+- `locate_field_schema` 返回的字段信息已足够清晰（无组件源码需要分析）
+- 直接根据 `reaction_rules`、`validator_rules` 等给出结论
 
 ## Step 4: 评估 sub-agent 结果并决策
 

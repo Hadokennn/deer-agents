@@ -92,6 +92,10 @@ class DeerShell:
 
         config_path = str(PROJECT_ROOT / "deer-flow" / "config.yaml")
 
+        # Per-agent skill whitelist (None = all skills)
+        agent_skills = self.agent_cfg.get("skills")
+        available_skills = set(agent_skills) if agent_skills else None
+
         self.client = DeerFlowClient(
             config_path=config_path,
             checkpointer=self._checkpointer,
@@ -99,6 +103,8 @@ class DeerShell:
             thinking_enabled=self.agent_cfg.get("thinking_enabled", False),
             subagent_enabled=self.agent_cfg.get("subagent_enabled", False),
             agent_name=self.agent_name,
+            middlewares=self._extra_middlewares or None,
+            available_skills=available_skills,
         )
 
     def _switch_agent(self, new_agent: str) -> bool:
@@ -173,10 +179,11 @@ class DeerShell:
             self.session_mgr.create(self.thread_id, agent_name=self.agent_name)
 
         try:
+            memory_cfg = self.agent_cfg.get("memory", {})
             events = self.client.stream(
                 text,
                 thread_id=self.thread_id,
-                extra_middlewares=self._extra_middlewares if self._extra_middlewares else None,
+                memory_enabled=memory_cfg.get("enabled", True),
             )
             result = render_stream(events, verbose=self._verbose)
 

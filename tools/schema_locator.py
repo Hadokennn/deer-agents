@@ -587,7 +587,8 @@ class SchemaLocatorTool(BaseTool):
                                 bash_commands.append(f'bash("读取 {f.name}", "cat {f}")')
 
         result["next_action"] = (
-            "请使用 task 工具委派 sub-agent 分析。将以下内容完整复制到 sub-agent prompt 中：\n\n"
+            "请使用 task 工具委派 sub-agent 分析。**必须指定 subagent_type 为 \"code-analyst\"**。"
+            "将以下内容完整复制到 sub-agent prompt 中：\n\n"
             "--- sub-agent prompt 开始 ---\n"
             "## 任务\n"
             "分析用户反馈的字段问题，给出根因和解决建议。\n\n"

@@ -276,8 +276,10 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware())
 
-    # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name))
+    # Add MemoryMiddleware (after TitleMiddleware) — skip if per-agent config disables it
+    memory_enabled = config.get("configurable", {}).get("memory_enabled", True)
+    if memory_enabled:
+        middlewares.append(MemoryMiddleware(agent_name=agent_name))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.

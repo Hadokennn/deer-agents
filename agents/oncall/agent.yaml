@@ -46,6 +46,9 @@ knowledge_dirs:
   - ./agents/oncall/knowledge/
 
 skills_dir: ./agents/oncall/skills/
+skills:
+  - schema-diagnosis
+  - runbook-lookup
 
 prompt: ./agents/oncall/prompt.md
 

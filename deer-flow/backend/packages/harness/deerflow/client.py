@@ -198,9 +198,9 @@ class DeerFlowClient:
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
-        # Pass through extra_middlewares if provided
-        if "extra_middlewares" in overrides:
-            configurable["extra_middlewares"] = overrides["extra_middlewares"]
+        # Pass through memory_enabled if provided (per-agent override)
+        if "memory_enabled" in overrides:
+            configurable["memory_enabled"] = overrides["memory_enabled"]
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
