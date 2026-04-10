@@ -1,0 +1,35 @@
+name: example_lookup
+description: |
+  Example pipeline for oncall — looks up a key in an in-memory store
+  with a fallback to a "default" namespace. Demonstrates conditional
+  branching, fallback resolution, and pipeline composition.
+
+  Use when: looking up a known key in two namespaces (primary then fallback).
+  Don't use when: the lookup needs LLM reasoning about which namespace to try.
+
+input:
+  key:
+    type: str
+    description: The key to look up
+  namespace:
+    type: str
+    description: Primary namespace to search
+
+steps:
+  - id: primary
+    tool: kv_lookup
+    input:
+      namespace: ${input.namespace}
+      key: ${input.key}
+
+  - id: fallback
+    tool: kv_lookup
+    input:
+      namespace: "default"
+      key: ${input.key}
+    when: ${primary.missing}
+
+output:
+  value: ${primary.value | fallback.value}
+  source: ${primary.source | fallback.source | "not_found"}
+  found: ${primary.value | fallback.value}
