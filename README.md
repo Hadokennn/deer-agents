@@ -113,6 +113,18 @@ deer-agents/
 │   └── bootstrap.py          ← 共享初始化（env、checkpointer 路径）
 ├── middlewares/
 │   └── mcp_overflow.py       ← 自定义 middleware 示例
+├── pipelines/                ← Mode 1: 声明式 Pipeline DSL
+│   ├── parser.py             ← YAML → Pipeline dataclass
+│   ├── resolver.py           ← ${var} 模板引擎
+│   ├── registry.py           ← name → tool lookup
+│   ├── executor.py           ← step-by-step 执行
+│   ├── tool_factory.py       ← Pipeline → StructuredTool
+│   └── loader.py             ← agent 集成 helper
+├── codeact/                  ← Mode 2: 生成式 CodeAct Executor
+│   ├── sandbox.py            ← 受限 Python 沙箱
+│   ├── namespace.py          ← BaseTool → Python callable
+│   ├── code_act_tool.py      ← 包装为 LangChain tool
+│   └── prompt.py             ← LLM 描述模板
 ├── evals/
 │   ├── framework/            ← 评测框架（agent 无关）
 │   │   ├── types.py          ← EvalCase / EvalResult / EvalReport
