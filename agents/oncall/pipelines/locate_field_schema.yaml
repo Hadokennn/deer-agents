@@ -1,0 +1,58 @@
+name: locate_field_schema_v2
+description: |
+  Pipeline version of locate_field_schema — locates template schema and
+  extracts field configuration via chained MCP calls.
+
+  Simplified vs the hardcoded Python version:
+  - No category tree fallback loop (only tries exact category)
+  - No component source code lookup
+  - No sub-agent prompt assembly
+
+  Use when: looking up a field's schema configuration in a known category.
+  Don't use when: need category fallback, component code analysis, or sub-agent delegation.
+
+input:
+  category_full_name:
+    type: str
+    description: "类目路径，如 '购物>果蔬生鲜>水果'"
+  field_name:
+    type: str
+    description: "字段名称（标题、key、组件名）。空字符串返回字段概览。"
+  product_type:
+    type: str
+    description: "商品类型数字枚举值。如 '1'=团购。"
+
+steps:
+  # Step 1: Call MCP locate_template
+  - id: locate
+    tool: locate_template
+    input:
+      category_full_name: ${input.category_full_name}
+      product_type: ${input.product_type}
+
+  # Step 2: Get full schema (only if locate found results)
+  - id: schema
+    tool: get_template_schema
+    input:
+      dimensions: ${locate.dimensions}
+    when: ${locate.dimensions}
+
+  # Step 3: Search for field (only if schema was retrieved)
+  - id: field
+    tool: search_field
+    input:
+      schema_config: ${schema.schema_config}
+      field_name: ${input.field_name}
+    when: ${schema.schema_config}
+
+output:
+  status: ${field.status | schema.status | locate.status}
+  field_key: ${field.field_key}
+  group: ${field.group}
+  x_component: ${field.x_component}
+  reaction_rules: ${field.reaction_rules}
+  schema_path: ${schema.schema_path}
+  category: ${schema.category}
+  config_dimension: ${schema.config_dimension}
+  available_fields: ${field.available_fields}
+  error: ${field.error | schema.error | locate.error}
