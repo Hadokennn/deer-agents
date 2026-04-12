@@ -17,4 +17,8 @@ class ToolConfig(BaseModel):
         ...,
         description="Variable name of the tool provider(e.g. deerflow.sandbox.tools:bash_tool)",
     )
+    ptc_eligible: bool = Field(
+        default=False,
+        description="If True, this tool is callable from code_execution (PTC) environment",
+    )
     model_config = ConfigDict(extra="allow")
