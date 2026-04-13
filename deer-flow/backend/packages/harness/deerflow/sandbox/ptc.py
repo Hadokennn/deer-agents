@@ -12,9 +12,8 @@ See: docs/superpowers/specs/2026-04-13-purpose-scoped-ptc-design.md
 from __future__ import annotations
 
 import builtins
-import contextlib
 import io
-import signal
+import threading
 import traceback
 from typing import Any
 
@@ -85,57 +84,81 @@ def _safe_modules() -> dict:
 
 def _execute_code(
     code: str,
-    tool_wrappers: dict[str, Any],
+    resolved_tools: list[tuple[Any, dict | None]],
     runtime: Any,
     timeout: int = _DEFAULT_TIMEOUT,
     max_output_chars: int = _DEFAULT_MAX_OUTPUT,
 ) -> str:
     """Execute LLM-generated Python code in a restricted namespace.
 
+    Thread-safe: each invocation builds fresh wrappers closing over the
+    call's runtime, and captures stdout via a per-call StringIO injected
+    as a custom `print` function (not via process-global redirect_stdout).
+
     Args:
         code: Python source to execute.
-        tool_wrappers: Mapping of function name → callable injected into namespace.
-                       Each wrapper with a `_runtime` attribute gets it set to
-                       `runtime` before execution.
-        runtime: The ToolRuntime (duck-typed) injected into wrappers.
-        timeout: Max wall-clock seconds.
-        max_output_chars: Max chars of stdout returned; beyond this, output
-                          is truncated with a marker.
+        resolved_tools: List of (tool, schema) pairs resolved from PTCToolConfig.
+        runtime: The ToolRuntime (duck-typed) to bind into tool wrappers.
+        timeout: Max wall-clock seconds. Enforced via daemon-thread join.
+        max_output_chars: Max chars of captured stdout returned.
 
     Returns:
-        Captured stdout (or an error / timeout message string).
+        Captured stdout (or error / timeout message).
     """
-    # Inject runtime into each wrapper's private slot
-    for wrapper in tool_wrappers.values():
-        if hasattr(wrapper, "_runtime"):
-            wrapper._runtime = runtime
+    # Build per-call wrappers with runtime baked into each closure
+    tool_wrappers = _build_tool_wrappers(resolved_tools, runtime)
+
+    # Per-call stdout buffer (thread-safe, isolated from sys.stdout).
+    # We do NOT use contextlib.redirect_stdout because it swaps sys.stdout
+    # globally — in a threaded context another thread's print() would leak
+    # into our StringIO. Instead we inject a custom print into the namespace.
+    stdout = io.StringIO()
+
+    def _captured_print(*args, **kwargs):
+        # Prevent the namespace code from overriding `file=`
+        kwargs.pop("file", None)
+        import builtins as _builtins
+        _builtins.print(*args, file=stdout, **kwargs)
+
+    safe_builtins = _restricted_builtins()
+    safe_builtins["print"] = _captured_print
 
     namespace: dict[str, Any] = {
         **tool_wrappers,
         **_safe_modules(),
-        "__builtins__": _restricted_builtins(),
+        "__builtins__": safe_builtins,
     }
 
-    stdout = io.StringIO()
+    # Run exec in a daemon thread with a join-based timeout.
+    # We use threading instead of signal.SIGALRM because SIGALRM only works
+    # in the main thread of the main interpreter. LangGraph runs tool calls
+    # from worker threads, which caused:
+    #   ValueError: signal only works in main thread of the main interpreter
+    # (production trace 417a5afd step 17)
+    #
+    # Limitation: Python has no safe way to forcibly terminate a thread.
+    # If the thread is still alive after join(timeout), we return a timeout
+    # error immediately but the runaway thread continues until it finishes
+    # or the process exits. daemon=True ensures it won't block process exit.
+    error_box: dict[str, Any] = {"type": None, "msg": None, "tb": None}
 
-    def _timeout_handler(signum, frame):
-        raise TimeoutError(f"Code execution exceeded {timeout}s limit")
-
-    # SIGALRM is Unix-only. Windows would need threading-based timeout.
-    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout)
-
-    try:
-        with contextlib.redirect_stdout(stdout):
+    def _run():
+        try:
             exec(code, namespace)
-    except TimeoutError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        tb = traceback.format_exc()
-        return f"Code execution error: {type(e).__name__}: {e}\n{tb}"
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        except Exception as e:
+            error_box["type"] = type(e).__name__
+            error_box["msg"] = str(e)
+            error_box["tb"] = traceback.format_exc()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        return f"Error: Code execution exceeded {timeout}s limit"
+
+    if error_box["type"] is not None:
+        return f"Code execution error: {error_box['type']}: {error_box['msg']}\n{error_box['tb']}"
 
     output = stdout.getvalue() or "(no output)"
 
@@ -206,7 +229,7 @@ def _extract_structured_content(tool_result: Any) -> Any:
 
 
 def _invoke_tool_with_runtime(tool: Any, kwargs: dict, runtime: Any) -> Any:
-    """Invoke a LangChain @tool-decorated function with runtime injected.
+    """Invoke a LangChain @tool-decorated function with runtime injected if declared.
 
     Uses the underlying `.func()` attribute to bypass pydantic ToolRuntime
     validation that `.invoke()` and `._run()` would perform. This lets PTC
@@ -221,6 +244,12 @@ def _invoke_tool_with_runtime(tool: Any, kwargs: dict, runtime: Any) -> Any:
     - For MCP tools patched via _make_sync_tool_wrapper, `.func` is the sync
       wrapper and accepts the same runtime kwarg
 
+    Runtime injection policy:
+    - Sandbox tools (bash, read_file, etc.) declare `runtime: ToolRuntime[...]`
+      in their args_schema — runtime IS passed.
+    - MCP tools (via langchain-mcp-adapters) don't declare `runtime` in their
+      args_schema — runtime is NOT passed to avoid TypeError.
+
     Args:
         tool: A LangChain BaseTool instance.
         kwargs: Business parameters to pass to the tool (no "runtime" key).
@@ -230,16 +259,21 @@ def _invoke_tool_with_runtime(tool: Any, kwargs: dict, runtime: Any) -> Any:
         Whatever the tool's underlying function returns (str for sandbox
         tools, (content, artifact) tuple for MCP tools via adapter).
     """
+    # Check args_schema.model_fields to determine if this tool declares runtime.
+    # This is more reliable than inspect.signature because:
+    # - MCP tools via langchain-mcp-adapters may have **kwargs in their func
+    #   signature (which inspect would see as accepting runtime), but the schema
+    #   doesn't declare runtime — passing it would cause unexpected behavior.
+    # - Sandbox tools explicitly declare runtime in their Pydantic schema.
+    declares_runtime = (
+        tool.args_schema is not None
+        and hasattr(tool.args_schema, "model_fields")
+        and "runtime" in tool.args_schema.model_fields
+    )
+
     func = getattr(tool, "func", None)
     if func is not None:
-        import inspect
-        sig = inspect.signature(func)
-        params = sig.parameters
-        accepts_runtime = (
-            "runtime" in params
-            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-        )
-        if accepts_runtime:
+        if declares_runtime:
             return func(runtime=runtime, **kwargs)
         return func(**kwargs)
     return tool.invoke(kwargs)
@@ -332,17 +366,25 @@ def _build_function_docs(resolved_tools: list[tuple[Any, dict | None]]) -> str:
     )
 
 
-def _build_tool_wrappers(resolved_tools: list[tuple[Any, dict | None]]) -> dict[str, Any]:
-    """Build name → callable mapping for the PTC exec namespace.
+def _build_tool_wrappers(
+    resolved_tools: list[tuple[Any, dict | None]],
+    runtime: Any,
+) -> dict[str, Any]:
+    """Build name → callable mapping for a SINGLE PTC invocation.
+
+    Each wrapper closes over `runtime` at creation time, so concurrent
+    invocations with different runtimes get isolated wrapper sets.
 
     Each wrapper:
     - Hides `runtime` and `description` parameters from the LLM.
     - Auto-injects `description="called from ptc tool"` if the tool accepts it.
-    - Invokes via `_invoke_tool_with_runtime` with the wrapper's `_runtime` slot.
+    - Invokes via `_invoke_tool_with_runtime` with `runtime` captured in closure.
     - Runs the result through `_extract_structured_content` to unwrap MCP tuples.
 
-    `_runtime` must be set on each wrapper before the code runs (done in
-    `_execute_code`).
+    Args:
+        resolved_tools: List of (tool, schema) pairs from PTCToolConfig resolution.
+        runtime: The ToolRuntime for this specific invocation. Captured in each
+                 wrapper closure — NOT set as a mutable attribute.
     """
     wrappers: dict[str, Any] = {}
 
@@ -356,13 +398,15 @@ def _build_tool_wrappers(resolved_tools: list[tuple[Any, dict | None]]) -> dict[
             accepts_description = False
 
         def _make_wrapper(tool_ref=tool, needs_desc=accepts_description):
+            # `runtime` is captured from the enclosing scope (single value per
+            # _build_tool_wrappers call), so each call to make_ptc_tool gets a
+            # fresh, isolated set of wrappers with no shared mutable state.
             def wrapper(**kwargs):
                 if needs_desc and "description" not in kwargs:
                     kwargs["description"] = "called from ptc tool"
-                result = _invoke_tool_with_runtime(tool_ref, kwargs, wrapper._runtime)
+                result = _invoke_tool_with_runtime(tool_ref, kwargs, runtime)
                 return _extract_structured_content(result)
 
-            wrapper._runtime = None
             return wrapper
 
         wrappers[_safe_python_name(tool.name)] = _make_wrapper()
@@ -386,6 +430,9 @@ def make_ptc_tool(
     - `func(code, runtime)` runs the code in a restricted namespace where each
       eligible tool is available as a callable
 
+    Thread safety: wrappers are built fresh per invocation inside _execute_code,
+    so concurrent calls with different runtimes don't share wrapper state.
+
     Args:
         ptc_config: A PTCToolConfig declaring name, purpose, and overrides.
         resolved_tools: List of (tool, output_schema_or_None) pairs resolved
@@ -394,11 +441,11 @@ def make_ptc_tool(
     Returns:
         A LangChain BaseTool ready to be appended to the agent's tool list.
     """
-    # Local import to avoid circular dependency
-    from langchain_core.tools import tool as lc_tool_decorator
-
     func_docs = _build_function_docs(resolved_tools)
-    tool_wrappers = _build_tool_wrappers(resolved_tools)
+    # NOTE: _build_tool_wrappers is NOT called here at factory time.
+    # It is called per-invocation inside _execute_code so that each call
+    # gets its own wrapper set with runtime captured in the closure.
+    # This prevents the concurrent-call race on shared wrapper._runtime state.
 
     timeout = ptc_config.timeout_seconds or _DEFAULT_TIMEOUT
     max_output = ptc_config.max_output_chars or _DEFAULT_MAX_OUTPUT
@@ -415,12 +462,15 @@ def make_ptc_tool(
         f"The `code` argument is the Python source to execute."
     )
 
+    # Local import to avoid circular dependency
+    from langchain_core.tools import tool as lc_tool_decorator
+
     @lc_tool_decorator(ptc_config.name, parse_docstring=False)
     def ptc_tool(code: str, runtime: Any = None) -> str:
         """Execute Python code programmatically within a purpose-scoped PTC environment."""
         return _execute_code(
             code,
-            tool_wrappers=tool_wrappers,
+            resolved_tools=resolved_tools,
             runtime=runtime,
             timeout=timeout,
             max_output_chars=max_output,

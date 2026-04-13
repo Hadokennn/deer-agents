@@ -1,6 +1,7 @@
 """Tests for deerflow.sandbox.ptc leaf helpers."""
 
 import pytest
+from typing import Any
 
 from deerflow.sandbox.ptc import (
     _execute_code,
@@ -64,43 +65,43 @@ def test_safe_modules_excludes_dangerous():
 
 
 def test_execute_code_captures_print_output():
-    result = _execute_code("print('hello world')", tool_wrappers={}, runtime=None)
+    result = _execute_code("print('hello world')", resolved_tools=[], runtime=None)
     assert result == "hello world\n"
 
 
 def test_execute_code_returns_no_output_marker_on_silence():
-    result = _execute_code("x = 1 + 1", tool_wrappers={}, runtime=None)
+    result = _execute_code("x = 1 + 1", resolved_tools=[], runtime=None)
     assert result == "(no output)"
 
 
 def test_execute_code_pre_imports_json():
     result = _execute_code(
         "print(json.dumps({'a': 1}))",
-        tool_wrappers={},
+        resolved_tools=[],
         runtime=None,
     )
     assert result.strip() == '{"a": 1}'
 
 
 def test_execute_code_returns_error_message_on_exception():
-    result = _execute_code("raise ValueError('boom')", tool_wrappers={}, runtime=None)
+    result = _execute_code("raise ValueError('boom')", resolved_tools=[], runtime=None)
     assert "ValueError" in result and "boom" in result
 
 
 def test_execute_code_blocks_import_os():
-    result = _execute_code("import os\nprint(os.listdir('/'))", tool_wrappers={}, runtime=None)
+    result = _execute_code("import os\nprint(os.listdir('/'))", resolved_tools=[], runtime=None)
     assert "error" in result.lower() or "Error" in result
 
 
 def test_execute_code_blocks_open():
-    result = _execute_code("open('/etc/passwd').read()", tool_wrappers={}, runtime=None)
+    result = _execute_code("open('/etc/passwd').read()", resolved_tools=[], runtime=None)
     assert "error" in result.lower() or "NameError" in result
 
 
 def test_execute_code_truncates_large_output():
     result = _execute_code(
         "print('x' * 30000)",
-        tool_wrappers={},
+        resolved_tools=[],
         runtime=None,
         max_output_chars=100,
     )
@@ -111,34 +112,55 @@ def test_execute_code_truncates_large_output():
 def test_execute_code_timeout():
     result = _execute_code(
         "while True:\n    pass",
-        tool_wrappers={},
+        resolved_tools=[],
         runtime=None,
         timeout=1,
     )
     assert "timeout" in result.lower() or "exceeded" in result.lower()
 
 
-def test_execute_code_calls_injected_wrapper_and_sets_runtime():
+def test_execute_code_passes_runtime_to_tool_via_wrappers():
+    """Verify runtime flows through _execute_code into a tool whose schema declares it."""
+    from pydantic import BaseModel, Field
+    from typing import Any
+
+    class _FakeSchemaWithRuntime(BaseModel):
+        runtime: Any = Field(default=None)
+        query: str = Field()
+
     calls = []
-    def fake_tool(**kwargs):
-        calls.append((kwargs, fake_tool._runtime))
-        return "tool_result"
-    fake_tool._runtime = None
+
+    class _FakeTool:
+        name = "fake_tool"
+        description = "fake"
+        args_schema = _FakeSchemaWithRuntime
+        metadata = {}
+
+        def func(self, *, runtime, **kwargs):
+            calls.append({"runtime": runtime, **kwargs})
+            return "tool_result"
+
+    tool = _FakeTool()
+    # Bind func so self is auto-passed (matches how real tools expose .func)
+    bound = tool.func
+    def _func(**kwargs):
+        return bound(**kwargs)
+    tool.func = _func
 
     result = _execute_code(
-        "print(fake_tool(x=42))",
-        tool_wrappers={"fake_tool": fake_tool},
+        "print(fake_tool(query='hi'))",
+        resolved_tools=[(tool, None)],
         runtime="test-runtime",
     )
     assert result.strip() == "tool_result"
-    assert calls == [({"x": 42}, "test-runtime")]
+    assert calls == [{"runtime": "test-runtime", "query": "hi"}]
 
 
 def test_execute_code_timeout_override_per_call():
     # Default is 30s; we pass timeout=1 to force a fast-fail
     result = _execute_code(
         "while True:\n    pass",
-        tool_wrappers={},
+        resolved_tools=[],
         runtime=None,
         timeout=1,
     )
@@ -206,6 +228,7 @@ def test_extract_structured_content_passes_through_non_mcp_tuple():
 
 class _FakeToolWithFunc:
     name = "fake"
+    args_schema = None
 
     def __init__(self):
         self.calls = []
@@ -219,10 +242,245 @@ def test_invoke_tool_with_runtime_uses_func():
     tool = _FakeToolWithFunc()
     result = _invoke_tool_with_runtime(tool, {"command": "ls"}, runtime="rt-1")
     assert "command" in result
-    assert tool.calls == [{"command": "ls", "runtime": "rt-1"}]
+    # args_schema is None so runtime is NOT passed (no model_fields to check)
+    assert tool.calls == [{"command": "ls"}]
 
 
 def test_invoke_tool_with_runtime_passes_runtime_kwarg():
-    tool = _FakeToolWithFunc()
-    _invoke_tool_with_runtime(tool, {}, runtime="ctx-123")
-    assert tool.calls[0]["runtime"] == "ctx-123"
+    """Tool with runtime declared in args_schema receives runtime kwarg."""
+    from pydantic import BaseModel, Field
+    from typing import Any
+
+    class _SchemaWithRuntime(BaseModel):
+        runtime: Any = Field(default=None)
+        command: str = Field()
+
+    received = {}
+
+    class _T:
+        name = "t"
+        args_schema = _SchemaWithRuntime
+        metadata: dict = {}
+        func: Any = None
+
+    tool = _T()
+    def _func(**kwargs):
+        received.update(kwargs)
+        return "ok"
+    tool.func = _func
+
+    _invoke_tool_with_runtime(tool, {"command": "ls"}, runtime="ctx-123")
+    assert received["runtime"] == "ctx-123"
+    assert received["command"] == "ls"
+
+
+# ---------- Regression: Bug 1 (signal in worker thread) ----------
+
+
+def test_execute_code_works_in_worker_thread():
+    """Regression: _execute_code must NOT use signal-based timeout because
+    signal.signal() only works in the main thread. LangGraph runs tool
+    calls from worker threads; this test simulates that.
+
+    Bug history: trace 417a5afd step 17 failed with
+    'ValueError: signal only works in main thread of the main interpreter'.
+    """
+    import threading as _threading
+
+    result_holder: dict[str, str] = {}
+
+    def _run_from_worker():
+        result_holder["result"] = _execute_code(
+            "print('hello from worker')",
+            resolved_tools=[],
+            runtime=None,
+        )
+
+    worker = _threading.Thread(target=_run_from_worker)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result_holder["result"] == "hello from worker\n"
+
+
+def test_execute_code_timeout_works_in_worker_thread():
+    """Regression: timeout must work from a worker thread, not just main."""
+    import threading as _threading
+
+    result_holder: dict[str, str] = {}
+
+    def _run_from_worker():
+        result_holder["result"] = _execute_code(
+            "while True:\n    pass",
+            resolved_tools=[],
+            runtime=None,
+            timeout=1,
+        )
+
+    worker = _threading.Thread(target=_run_from_worker)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert "exceeded" in result_holder["result"].lower() or "timeout" in result_holder["result"].lower()
+
+
+# ---------- Regression: Bug 2 (runtime kwarg to MCP tools) ----------
+
+
+def test_invoke_tool_without_runtime_field_omits_runtime_kwarg():
+    """Regression: MCP tools don't declare `runtime` in their args_schema.
+    _invoke_tool_with_runtime must NOT pass runtime=... to them.
+
+    Bug history: initial implementation always passed runtime=..., which
+    would raise TypeError for MCP tools. This test uses a fake tool whose
+    schema has no runtime field and verifies the call succeeds.
+    """
+    from pydantic import BaseModel, Field
+
+    class _SchemaNoRuntime(BaseModel):
+        query: str = Field()
+
+    received_kwargs: dict = {}
+
+    class _FakeMcpTool:
+        name = "fake_mcp"
+        description = "fake mcp tool"
+        args_schema = _SchemaNoRuntime
+        metadata: dict = {}
+        func: Any = None  # set below
+
+    tool = _FakeMcpTool()
+
+    def _func(**kwargs):
+        received_kwargs.update(kwargs)
+        return "mcp_result"
+    tool.func = _func
+
+    result = _invoke_tool_with_runtime(tool, {"query": "hello"}, runtime="should-not-leak")
+    assert result == "mcp_result"
+    # Critical assertion: runtime was NOT passed to the tool
+    assert "runtime" not in received_kwargs
+    assert received_kwargs == {"query": "hello"}
+
+
+def test_invoke_tool_with_runtime_field_includes_runtime_kwarg():
+    """Sanity: sandbox tools (with runtime in args_schema) still receive runtime."""
+    from pydantic import BaseModel, Field
+    from typing import Any
+
+    class _SchemaWithRuntime(BaseModel):
+        runtime: Any = Field(default=None)
+        command: str = Field()
+
+    received_kwargs: dict = {}
+
+    class _FakeSandboxTool:
+        name = "fake_sandbox"
+        description = "fake sandbox tool"
+        args_schema = _SchemaWithRuntime
+        metadata: dict = {}
+        func: Any = None  # set below
+
+    tool = _FakeSandboxTool()
+    def _func(**kwargs):
+        received_kwargs.update(kwargs)
+        return "sandbox_result"
+    tool.func = _func
+
+    result = _invoke_tool_with_runtime(tool, {"command": "ls"}, runtime="my-runtime")
+    assert result == "sandbox_result"
+    assert received_kwargs == {"runtime": "my-runtime", "command": "ls"}
+
+
+# ---------- Regression: Bug 3 (concurrent runtime isolation) ----------
+
+
+def test_concurrent_execute_code_calls_isolate_runtimes():
+    """Regression: Two concurrent PTC invocations with different runtimes
+    must each see their own runtime, not the other call's.
+
+    Before the fix, wrappers shared a `_runtime` attribute and concurrent
+    calls would race.
+    """
+    import threading as _threading
+    import time
+    from pydantic import BaseModel, Field
+    from typing import Any
+
+    class _SchemaWithRuntime(BaseModel):
+        runtime: Any = Field(default=None)
+
+    observed: list[str] = []
+    observed_lock = _threading.Lock()
+
+    class _FakeTool:
+        name = "fake"
+        description = "fake"
+        args_schema = _SchemaWithRuntime
+        metadata: dict = {}
+        func: Any = None  # set below
+
+    tool = _FakeTool()
+
+    def _func(**kwargs):
+        # Delay to ensure both calls overlap in time
+        time.sleep(0.2)
+        with observed_lock:
+            observed.append(str(kwargs.get("runtime")))
+        return "ok"
+    tool.func = _func
+
+    results: dict[int, str] = {}
+
+    def _call(idx: int, runtime_name: str):
+        r = _execute_code(
+            "print(fake())",
+            resolved_tools=[(tool, None)],
+            runtime=runtime_name,
+            timeout=5,
+        )
+        results[idx] = r
+
+    t1 = _threading.Thread(target=_call, args=(1, "runtime-A"))
+    t2 = _threading.Thread(target=_call, args=(2, "runtime-B"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    # Both observed runtimes should be present — one "runtime-A" and one "runtime-B"
+    assert sorted(observed) == ["runtime-A", "runtime-B"], (
+        f"Runtime cross-contamination: observed={observed}. "
+        "Concurrent calls saw each other's runtime, indicating the wrapper "
+        "state is not per-invocation."
+    )
+
+
+# ---------- Regression: stdout is per-call, not process-global ----------
+
+
+def test_execute_code_does_not_touch_process_stdout():
+    """Regression: verify _execute_code's output capture is isolated
+    from sys.stdout (doesn't use contextlib.redirect_stdout)."""
+    import sys
+    import io as _io
+
+    # Before the call, swap sys.stdout for a buffer. If _execute_code uses
+    # redirect_stdout, it would swap again and restore our buffer after — but
+    # more importantly, anything printed inside the exec that lands on sys.stdout
+    # should NOT appear in _execute_code's captured output.
+    captured_sys_stdout = _io.StringIO()
+    original_stdout = sys.stdout
+    sys.stdout = captured_sys_stdout
+    try:
+        result = _execute_code("print('hello')", resolved_tools=[], runtime=None)
+    finally:
+        sys.stdout = original_stdout
+
+    # The code's output goes to the PTC-managed buffer, not to sys.stdout
+    assert "hello" in result
+    # Nothing should have been written to our replacement sys.stdout
+    assert "hello" not in captured_sys_stdout.getvalue(), (
+        "_execute_code leaked output to sys.stdout — it should use a "
+        "custom print injected into namespace, not contextlib.redirect_stdout"
+    )

@@ -36,9 +36,9 @@ class _FakeTool:
         self.name = name
         self.description = description_str
         self.args_schema = args_schema
-        self.metadata = {}
+        self.metadata: dict = {}
         self._run_return = run_return
-        self.calls = []
+        self.calls: list = []
 
         def _func(**kwargs):
             self.calls.append(kwargs)
@@ -111,15 +111,22 @@ def test_build_function_docs_lists_multiple_tools():
 def test_build_tool_wrappers_creates_one_per_tool():
     a = _FakeTool("a", _SchemaNoDesc)
     b = _FakeTool("b", _SchemaNoDesc)
-    wrappers = _build_tool_wrappers([(a, None), (b, None)])
+    wrappers = _build_tool_wrappers([(a, None), (b, None)], runtime=None)
     assert "a" in wrappers and "b" in wrappers
 
 
 def test_wrapper_forwards_kwargs_and_injects_description_runtime():
-    tool = _FakeTool("bash", _SchemaBash, run_return="hello")
-    wrappers = _build_tool_wrappers([(tool, None)])
+    """Wrapper for a tool that declares `description` in its schema injects it,
+    and runtime is captured at construction time (not set via attribute)."""
+
+    class _SchemaBashWithRuntime(BaseModel):
+        command: str = Field(description="The command to run")
+        description: str = Field(default="", description="What this command does")
+        runtime: Any = Field(default=None)
+
+    tool = _FakeTool("bash", _SchemaBashWithRuntime, run_return="hello")
+    wrappers = _build_tool_wrappers([(tool, None)], runtime="test-runtime")
     wrapper = wrappers["bash"]
-    wrapper._runtime = "test-runtime"
 
     result = wrapper(command="echo hi")
     assert result == "hello"
@@ -130,9 +137,8 @@ def test_wrapper_forwards_kwargs_and_injects_description_runtime():
 
 def test_wrapper_skips_description_when_tool_does_not_accept_it():
     tool = _FakeTool("search", _SchemaNoDesc)
-    wrappers = _build_tool_wrappers([(tool, None)])
+    wrappers = _build_tool_wrappers([(tool, None)], runtime=None)
     wrapper = wrappers["search"]
-    wrapper._runtime = None
 
     wrapper(query="foo")
     assert "description" not in tool.calls[0]
@@ -145,9 +151,8 @@ def test_wrapper_unwraps_mcp_tuple_to_structured_content():
         _SchemaNoDesc,
         run_return=(["text content"], {"structured_content": {"key": "value"}}),
     )
-    wrappers = _build_tool_wrappers([(tool, None)])
+    wrappers = _build_tool_wrappers([(tool, None)], runtime=None)
     wrapper = wrappers["mcp_tool"]
-    wrapper._runtime = None
 
     result = wrapper(query="foo")
     assert result == {"key": "value"}
@@ -155,12 +160,43 @@ def test_wrapper_unwraps_mcp_tuple_to_structured_content():
 
 def test_wrapper_preserves_plain_string_result():
     tool = _FakeTool("bash", _SchemaBash, run_return="raw output")
-    wrappers = _build_tool_wrappers([(tool, None)])
+    wrappers = _build_tool_wrappers([(tool, None)], runtime=None)
     wrapper = wrappers["bash"]
-    wrapper._runtime = None
 
     result = wrapper(command="echo hi")
     assert result == "raw output"
+
+
+def test_build_tool_wrappers_runtime_captured_in_closure():
+    """Each call to _build_tool_wrappers with a different runtime produces
+    wrappers that use that runtime — no shared mutable _runtime attribute."""
+
+    class _SchemaWithRuntime(BaseModel):
+        runtime: Any = Field(default=None)
+        query: str = Field()
+
+    seen_runtimes: list[Any] = []
+
+    class _RecordingTool:
+        name = "rt"
+        description = "recording"
+        args_schema = _SchemaWithRuntime
+        metadata: dict = {}
+        func: Any = None
+
+    tool = _RecordingTool()
+    def _func(**kwargs):
+        seen_runtimes.append(kwargs.get("runtime"))
+        return "ok"
+    tool.func = _func
+
+    wrappers_a = _build_tool_wrappers([(tool, None)], runtime="runtime-A")
+    wrappers_b = _build_tool_wrappers([(tool, None)], runtime="runtime-B")
+
+    wrappers_a["rt"](query="x")
+    wrappers_b["rt"](query="y")
+
+    assert seen_runtimes == ["runtime-A", "runtime-B"]
 
 
 # ---------- make_ptc_tool ----------
