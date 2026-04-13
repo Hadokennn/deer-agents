@@ -32,6 +32,15 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+def _collect_ptc_referenced_tool_names(ptc_tools_config) -> set[str]:
+    """Return the set of tool names referenced by any PTC tool's eligible_tools."""
+    referenced: set[str] = set()
+    for ptc_cfg in ptc_tools_config or []:
+        for eligible in ptc_cfg.eligible_tools:
+            referenced.add(eligible.name)
+    return referenced
+
+
 def _resolve_ptc_eligible_tools(
     ptc_config,  # PTCToolConfig — untyped to avoid circular import at module load
     tool_registry: dict[str, BaseTool],
@@ -158,12 +167,28 @@ def get_available_tools(
                         from deerflow.tools.builtins.tool_search import DeferredToolRegistry, set_deferred_registry
                         from deerflow.tools.builtins.tool_search import tool_search as tool_search_tool
 
+                        # PTC tools need their referenced MCP tools to stay
+                        # visible to the LLM (so it can see input schemas
+                        # when writing code). Collect referenced names and
+                        # exclude them from the deferred registry.
+                        ptc_referenced = _collect_ptc_referenced_tool_names(
+                            getattr(config, "ptc_tools", None)
+                        )
+
                         registry = DeferredToolRegistry()
+                        deferred_count = 0
                         for t in mcp_tools:
+                            if getattr(t, "name", None) in ptc_referenced:
+                                # Keep this MCP tool visible for PTC
+                                continue
                             registry.register(t)
+                            deferred_count += 1
                         set_deferred_registry(registry)
                         builtin_tools.append(tool_search_tool)
-                        logger.info(f"Tool search active: {len(mcp_tools)} tools deferred")
+                        logger.info(
+                            f"Tool search active: {deferred_count} tool(s) deferred, "
+                            f"{len(mcp_tools) - deferred_count} tool(s) kept visible for PTC"
+                        )
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
