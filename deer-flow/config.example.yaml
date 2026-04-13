@@ -878,3 +878,59 @@ checkpointer:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Purpose-scoped Programmatic Tool Calling (PTC)
+# ============================================================================
+#
+# Each PTC tool is a LangChain tool that accepts a `code: str` argument,
+# executes that code in a restricted Python namespace where the listed
+# eligible tools are available as callable functions, and returns the printed
+# output. Tool return values stay inside the code scope — only print() output
+# enters the model context.
+#
+# See docs/superpowers/specs/2026-04-13-purpose-scoped-ptc-design.md
+#
+# Writing a good `purpose` field:
+# - Trigger-oriented ("Use this when you need to ...")
+# - Mentions what it returns
+# - Example good: "Use this when you need to correlate multiple alerts across
+#   time. Fetches metrics in parallel and returns a correlation summary."
+# - Example bad: "Analyzes alerts. Can query metrics, logs, and incidents."
+#
+# Rules:
+# - `name` must not collide with any other tool (raises ValueError)
+# - `eligible_tools` must contain at least one entry (pydantic validation)
+# - Missing eligible tool → PTC tool is skipped at startup (logs warning)
+# - `timeout_seconds` and `max_output_chars` override module defaults (30s / 20000)
+# ============================================================================
+# ptc_tools:
+#   - name: analyze_alert_correlation
+#     purpose: >
+#       Use this when you need to correlate multiple alerts across time
+#       and dimensions. Fetches metrics for N alerts in parallel, finds
+#       shared tags / time windows, and returns a structured correlation
+#       summary. Preferred over calling get_alert_metrics repeatedly.
+#     timeout_seconds: 60      # optional, overrides default 30s
+#     max_output_chars: 40000  # optional, overrides default 20000
+#     eligible_tools:
+#       - name: get_alert_metrics
+#         # If the MCP tool declares outputSchema, it's used automatically.
+#         # Otherwise you can supply one here:
+#         # output_schema:
+#         #   type: object
+#         #   properties:
+#         #     cluster_id: { type: string }
+#         #     log_count: { type: integer }
+#         #   required: [cluster_id, log_count]
+#       - name: query_log_cluster
+#
+#   - name: incident_timeline_replay
+#     purpose: >
+#       Use this when you need to reconstruct a chronological timeline
+#       of an incident from tickets, alerts, and operation logs.
+#       Returns a structured timeline sorted by event time.
+#     eligible_tools:
+#       - name: search_incident
+#       - name: get_alert_metrics
+#       - name: query_operation_log

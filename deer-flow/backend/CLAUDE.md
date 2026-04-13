@@ -260,6 +260,22 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type, max_turns)
 
+**Purpose-Scoped Programmatic Tool Calling (PTC)** (declared via `config.ptc_tools`):
+
+- Each PTC tool is a LangChain tool accepting a `code: str` argument that
+  runs in a restricted Python namespace where its declared eligible tools
+  are available as callable functions
+- Only `print()` output enters the model context; tool return values
+  stay inside the code scope
+- Config schema: `PTCToolConfig` with `name`, `purpose`, `eligible_tools`,
+  optional `timeout_seconds` / `max_output_chars` overrides
+- Implementation: `packages/harness/deerflow/sandbox/ptc.py`
+  (`make_ptc_tool`, `_execute_code`, MCP tuple unwrapping)
+- Registered in `get_available_tools()` via `_resolve_ptc_eligible_tools`
+- When `tool_search.enabled=True`, MCP tools referenced by any PTC tool are
+  kept out of the deferred registry so the LLM can see their input schemas
+- Spec: `docs/superpowers/specs/2026-04-13-purpose-scoped-ptc-design.md`
+
 **Community tools** (`packages/harness/deerflow/community/`):
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
 - `jina_ai/` - Web fetch via Jina reader API with readability extraction
@@ -381,6 +397,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
 - `subagents.enabled` - Master switch for subagent delegation
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens)
+- `ptc_tools` - Purpose-scoped PTC tools: list of PTCToolConfig entries with name/purpose/eligible_tools
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description)
