@@ -22,7 +22,7 @@ from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_usage_config import TokenUsageConfig
-from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
+from deerflow.config.tool_config import PTCToolConfig, ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 
 load_dotenv()
@@ -46,6 +46,10 @@ class AppConfig(BaseModel):
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
+    ptc_tools: list[PTCToolConfig] = Field(
+        default_factory=list,
+        description="Purpose-scoped PTC tools. Each declares a name, purpose, and eligible_tools.",
+    )
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")

@@ -83,3 +83,52 @@ def test_ptc_tool_config_accepts_multiple_eligible_tools():
     )
     assert len(cfg.eligible_tools) == 3
     assert cfg.eligible_tools[0].name == "search_incident"
+
+
+def test_app_config_has_empty_ptc_tools_by_default():
+    """AppConfig.ptc_tools defaults to empty list when not specified."""
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    cfg = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    assert cfg.ptc_tools == []
+
+
+def test_app_config_accepts_ptc_tools():
+    """AppConfig.ptc_tools accepts a list of PTCToolConfig."""
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    cfg = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        ptc_tools=[
+            {
+                "name": "analyze_alerts",
+                "purpose": "Use this to analyze alerts",
+                "eligible_tools": [{"name": "bash"}],
+            }
+        ],
+    )
+    assert len(cfg.ptc_tools) == 1
+    assert cfg.ptc_tools[0].name == "analyze_alerts"
+    assert cfg.ptc_tools[0].eligible_tools[0].name == "bash"
+
+
+def test_app_config_ptc_tools_validates_min_length():
+    """Pydantic validation fires when eligible_tools is empty."""
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            ptc_tools=[
+                {
+                    "name": "broken",
+                    "purpose": "...",
+                    "eligible_tools": [],
+                }
+            ],
+        )
