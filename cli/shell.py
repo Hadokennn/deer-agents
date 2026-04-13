@@ -107,6 +107,16 @@ class DeerShell:
             available_skills=available_skills,
         )
 
+        ptc_tools_raw = self.agent_cfg.get("ptc_tools")
+        if ptc_tools_raw:
+            from deerflow.config.tool_config import PTCToolConfig
+            from deerflow.config.app_config import set_app_config
+
+            ptc_tools = [PTCToolConfig(**c) for c in ptc_tools_raw]
+            patched = self.client._app_config.model_copy(update={"ptc_tools": ptc_tools})
+            set_app_config(patched)
+            self.client._app_config = patched
+
     def _switch_agent(self, new_agent: str) -> bool:
         """Switch to a different agent. Returns True on success."""
         available = list_available_agents()

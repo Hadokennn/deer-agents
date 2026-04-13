@@ -11,7 +11,7 @@ tool_groups:
   - file:read
   - file:write
   - bash
-  - oncall
+  # - oncall
 
 subagent_enabled: true
 
@@ -54,3 +54,43 @@ prompt: ./agents/oncall/prompt.md
 
 memory:
   enabled: false
+
+ptc_tools:
+  - name: locate_template_schema
+    purpose: >
+      Use this when you need to locate a product template schema and
+      extract field configuration. Chains locate_template (category →
+      config dimension) and get_last_template_detail (dimension → full
+      schema), then searches for a specific field. Returns the field's
+      schema fragment including reaction_rules, validator_rules, and
+      x-component info. Preferred over calling MCP tools individually.
+    timeout_seconds: 60
+    max_output_chars: 40000
+    eligible_tools:
+      - name: bytedance-mcp-ace_ai_ace_ai_locate_template
+        output_schema:
+          type: array
+          items:
+            type: object
+            properties:
+              config_dimension:
+                type: object
+                properties:
+                  category_full_name: { type: string }
+                  category_id: { type: string }
+                  product_type: { type: string }
+                  product_sub_type: { type: string }
+                  template_type: { type: string }
+                  template_sub_type: { type: string }
+      - name: bytedance-mcp-ace_ai_ace_ai_get_last_template_detail
+        output_schema:
+          type: object
+          properties:
+            online_template:
+              type: array
+              items:
+                type: object
+                properties:
+                  template_name: { type: string }
+                  schema_config: { type: string, description: "JSON string of full template schema" }
+                  attr_list: { type: array }

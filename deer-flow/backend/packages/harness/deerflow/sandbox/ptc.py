@@ -230,13 +230,35 @@ def _invoke_tool_with_runtime(tool: Any, kwargs: dict, runtime: Any) -> Any:
         Whatever the tool's underlying function returns (str for sandbox
         tools, (content, artifact) tuple for MCP tools via adapter).
     """
-    return tool.func(runtime=runtime, **kwargs)
+    func = getattr(tool, "func", None)
+    if func is not None:
+        import inspect
+        sig = inspect.signature(func)
+        params = sig.parameters
+        accepts_runtime = (
+            "runtime" in params
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        )
+        if accepts_runtime:
+            return func(runtime=runtime, **kwargs)
+        return func(**kwargs)
+    return tool.invoke(kwargs)
 
 
 # ---------- Composition layer ----------
 
 
 _SKIP_PARAMS = {"runtime", "description"}
+
+
+def _safe_python_name(name: str) -> str:
+    """Convert a tool name to a valid Python identifier.
+
+    Replaces dashes and dots with underscores so MCP tool names like
+    'bytedance-mcp-ace_ai_ace_ai_locate_template' become callable
+    Python function names in the PTC exec namespace.
+    """
+    return name.replace("-", "_").replace(".", "_")
 
 
 def _build_function_docs(resolved_tools: list[tuple[Any, dict | None]]) -> str:
@@ -261,21 +283,33 @@ def _build_function_docs(resolved_tools: list[tuple[Any, dict | None]]) -> str:
     docs = []
     for tool, output_schema in resolved_tools:
         params = []
-        if tool.args_schema is not None:
-            for name, field in tool.args_schema.model_fields.items():
-                if name in _SKIP_PARAMS:
-                    continue
-                annotation = field.annotation
-                type_name = (
-                    annotation.__name__
-                    if hasattr(annotation, "__name__")
-                    else str(annotation)
-                )
-                if field.default is not None and field.default is not ...:
-                    default = f" = {field.default!r}"
-                else:
-                    default = ""
-                params.append(f"{name}: {type_name}{default}")
+        schema = tool.args_schema
+        if schema is not None:
+            if hasattr(schema, "model_fields"):
+                for name, field in schema.model_fields.items():
+                    if name in _SKIP_PARAMS:
+                        continue
+                    annotation = field.annotation
+                    type_name = (
+                        annotation.__name__
+                        if hasattr(annotation, "__name__")
+                        else str(annotation)
+                    )
+                    if field.default is not None and field.default is not ...:
+                        default = f" = {field.default!r}"
+                    else:
+                        default = ""
+                    params.append(f"{name}: {type_name}{default}")
+            elif isinstance(schema, dict):
+                _JSON_TYPE_MAP = {"string": "str", "integer": "int", "number": "float",
+                                  "boolean": "bool", "array": "list", "object": "dict"}
+                required = set(schema.get("required", []))
+                for name, prop in schema.get("properties", {}).items():
+                    if name in _SKIP_PARAMS:
+                        continue
+                    type_name = _JSON_TYPE_MAP.get(prop.get("type", ""), "Any")
+                    default = "" if name in required else " = None"
+                    params.append(f"{name}: {type_name}{default}")
 
         if output_schema is not None:
             return_type = "dict | list"
@@ -287,7 +321,8 @@ def _build_function_docs(resolved_tools: list[tuple[Any, dict | None]]) -> str:
             return_type = "Any"
             schema_hint = "\n  Returns raw tool result (may be str, dict, or tuple)"
 
-        sig = f"{tool.name}({', '.join(params)}) -> {return_type}"
+        safe_name = _safe_python_name(tool.name)
+        sig = f"{safe_name}({', '.join(params)}) -> {return_type}"
         desc = tool.description.split("\n")[0]
         docs.append(f"- {sig}\n  {desc}{schema_hint}")
 
@@ -312,10 +347,13 @@ def _build_tool_wrappers(resolved_tools: list[tuple[Any, dict | None]]) -> dict[
     wrappers: dict[str, Any] = {}
 
     for tool, _schema in resolved_tools:
-        accepts_description = (
-            tool.args_schema is not None
-            and "description" in tool.args_schema.model_fields
-        )
+        schema = tool.args_schema
+        if schema is not None and hasattr(schema, "model_fields"):
+            accepts_description = "description" in schema.model_fields
+        elif isinstance(schema, dict):
+            accepts_description = "description" in schema.get("properties", {})
+        else:
+            accepts_description = False
 
         def _make_wrapper(tool_ref=tool, needs_desc=accepts_description):
             def wrapper(**kwargs):
@@ -327,7 +365,7 @@ def _build_tool_wrappers(resolved_tools: list[tuple[Any, dict | None]]) -> dict[
             wrapper._runtime = None
             return wrapper
 
-        wrappers[tool.name] = _make_wrapper()
+        wrappers[_safe_python_name(tool.name)] = _make_wrapper()
 
     return wrappers
 

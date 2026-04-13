@@ -108,6 +108,17 @@ def _create_client():
         subagent_enabled=agent_cfg.get("subagent_enabled", False),
         agent_name="oncall",
     )
+
+    ptc_tools_raw = agent_cfg.get("ptc_tools")
+    if ptc_tools_raw:
+        from deerflow.config.tool_config import PTCToolConfig
+        from deerflow.config.app_config import set_app_config
+
+        ptc_tools = [PTCToolConfig(**c) for c in ptc_tools_raw]
+        patched = client._app_config.model_copy(update={"ptc_tools": ptc_tools})
+        set_app_config(patched)
+        client._app_config = patched
+
     return client, cp_ctx
 
 
