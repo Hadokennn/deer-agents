@@ -32,6 +32,47 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+def _resolve_ptc_eligible_tools(
+    ptc_config,  # PTCToolConfig — untyped to avoid circular import at module load
+    tool_registry: dict[str, BaseTool],
+) -> list[tuple[BaseTool, dict | None]] | None:
+    """Resolve a PTC tool's eligible_tools to (tool_instance, output_schema) pairs.
+
+    Output schema priority for each eligible entry:
+    1. `_extract_output_schema(tool)` — forward-compatible MCP path
+    2. `eligible.output_schema` from PTCEligibleToolConfig
+    3. None (still valid; LLM will handle raw return values)
+
+    Returns None if ANY eligible tool is missing from the registry — in that
+    case the caller should skip the entire PTC tool (log warning, don't raise).
+    """
+    from deerflow.sandbox.ptc import _extract_output_schema
+
+    resolved: list[tuple[BaseTool, dict | None]] = []
+
+    for eligible in ptc_config.eligible_tools:
+        tool = tool_registry.get(eligible.name)
+        if tool is None:
+            logger.warning(
+                "PTC tool '%s': eligible tool '%s' not found in registry; "
+                "skipping PTC tool registration",
+                ptc_config.name,
+                eligible.name,
+            )
+            return None
+
+        # Output schema: try MCP-native first, then config override, else None
+        mcp_schema = _extract_output_schema(tool)
+        if mcp_schema is not None:
+            resolved.append((tool, mcp_schema))
+        elif eligible.output_schema is not None:
+            resolved.append((tool, eligible.output_schema))
+        else:
+            resolved.append((tool, None))
+
+    return resolved
+
+
 def get_available_tools(
     groups: list[str] | None = None,
     include_mcp: bool = True,
@@ -142,4 +183,37 @@ def get_available_tools(
         logger.warning(f"Failed to load ACP tool: {e}")
 
     logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}")
-    return loaded_tools + builtin_tools + mcp_tools + acp_tools
+
+    base_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
+
+    # Build tool registry for PTC resolution
+    tool_registry: dict[str, BaseTool] = {}
+    for t in base_tools:
+        name = getattr(t, "name", None)
+        if name:
+            tool_registry[name] = t
+
+    # Register purpose-scoped PTC tools
+    ptc_tools_config = getattr(config, "ptc_tools", None) or []
+    ptc_tools_list: list[BaseTool] = []
+    for ptc_cfg in ptc_tools_config:
+        # Name collision check — fail fast
+        if ptc_cfg.name in tool_registry:
+            raise ValueError(
+                f"PTC tool name '{ptc_cfg.name}' collides with an existing tool. "
+                f"Rename the PTC tool to something distinct (e.g. 'ptc_{ptc_cfg.name}')."
+            )
+
+        resolved = _resolve_ptc_eligible_tools(ptc_cfg, tool_registry)
+        if resolved is None:
+            # Missing eligible tool — already logged, skip this PTC tool
+            continue
+
+        from deerflow.sandbox.ptc import make_ptc_tool
+
+        ptc_tool = make_ptc_tool(ptc_cfg, resolved)
+        ptc_tools_list.append(ptc_tool)
+        tool_registry[ptc_cfg.name] = ptc_tool  # prevent self-collision between PTC tools
+        logger.info(f"Registered PTC tool '{ptc_cfg.name}' with {len(resolved)} eligible tool(s)")
+
+    return base_tools + ptc_tools_list
