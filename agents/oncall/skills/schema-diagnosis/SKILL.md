@@ -34,7 +34,7 @@ allowed-tools:
 **尽量拿到：**
 - 商品类型 — 用户可能说"团购"、"代金券"、"配送"等中文名称
 
-**匹配规则：** 读取 `./template_properties_map.json` 的枚举，做以下匹配：
+**匹配规则：** 读取 `./referrences/template_properties_map.json` 的枚举，做以下匹配：
 1. 先尝试匹配 `product_sub_type`（更精确），如"权益卡"→ `101`
 2. 匹配不上 `product_sub_type` 再匹配 `product_type`，如"团购"→ `1`
 3. 都匹配不上就只传 `category_full_name`，让 `locate_template` 返回所有匹配
