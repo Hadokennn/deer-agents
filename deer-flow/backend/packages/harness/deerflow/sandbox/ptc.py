@@ -236,30 +236,58 @@ def _extract_output_schema(tool: Any) -> dict | None:
 
 
 def _extract_structured_content(tool_result: Any) -> Any:
-    """Extract structured content from a tool result.
+    """Extract structured content from a tool result for ergonomic LLM access.
 
     MCP tools via langchain-mcp-adapters return a `(content, artifact)`
     tuple (StructuredTool with response_format="content_and_artifact").
-    The artifact is a dict with `structured_content` holding parsed data.
 
-    Shape handling:
-    - `(content, artifact_dict_with_structured_content)` → return structured_content
-    - `(content, None)` or artifact without the key → return content
-    - Any other tuple shape (wrong length) → pass through as-is
-    - Non-tuple (str, dict, list, object) → pass through as-is
+    Three extraction paths, in priority order:
+
+    1. **outputSchema path** (forward-compat): if the artifact has
+       `structured_content` (because the MCP server declared outputSchema),
+       return it directly. **Currently never fires** because adapter 0.2.2
+       doesn't expose outputSchema, but kept for future versions.
+
+    2. **JSON text auto-parse** (common case): MCP tools that don't declare
+       outputSchema typically return a SINGLE TextContent block whose text
+       is a JSON string. We auto-parse it so the LLM gets the structured
+       data directly instead of a confusing list-of-dict-of-string-of-JSON.
+       If the text isn't valid JSON, return it as a plain string.
+
+    3. **Fallback**: multi-block content or other shapes are returned as-is.
+
+    For non-tuple results (sandbox tool strings, plain dicts/lists), return
+    the value unchanged.
 
     Args:
         tool_result: Raw return value from a tool invocation.
 
     Returns:
-        Structured content (dict/list) if available, else the original value.
+        Structured content (dict/list/str) when extractable, else the
+        original value unchanged.
     """
     if isinstance(tool_result, tuple) and len(tool_result) == 2:
         content, artifact = tool_result
+
+        # Path 1: outputSchema-declared structured content
         if isinstance(artifact, dict):
             structured = artifact.get("structured_content")
             if structured is not None:
                 return structured
+
+        # Path 2: single TextContent block — auto-parse JSON or return text
+        if isinstance(content, list) and len(content) == 1:
+            block = content[0]
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                try:
+                    import json as _json
+                    return _json.loads(text)
+                except (ValueError, Exception):
+                    # Not JSON — return the raw text string
+                    return text
+
+        # Path 3: multi-block or non-text content — return content list as-is
         return content
     return tool_result
 

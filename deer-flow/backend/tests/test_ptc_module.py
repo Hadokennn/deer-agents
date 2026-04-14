@@ -257,10 +257,56 @@ def test_extract_structured_content_from_mcp_tuple_with_artifact():
     assert _extract_structured_content(result) == {"temperature": 22.5, "conditions": "sunny"}
 
 
-def test_extract_structured_content_from_mcp_tuple_with_none_artifact():
-    content = [{"type": "text", "text": "plain"}]
+def test_extract_structured_content_single_text_block_with_json_auto_parses():
+    """Common MCP case: single TextContent with JSON text → auto-parse to dict.
+
+    langchain-mcp-adapters converts MCP TextContent to {"type": "text", "text": ...}.
+    Most MCP tools without outputSchema return a single text block with
+    JSON-encoded data. We auto-parse so LLM-generated PTC code can access
+    fields directly without manually drilling content[0]["text"] + json.loads.
+
+    Regression: thread 26848e52 step 38 — LLM tried result['config_dimension']
+    on what was actually [{"type": "text", "text": "<json>"}], got KeyError.
+    """
+    content = [{"type": "text", "text": '{"config_dimension": {"category_id": 5019003}}'}]
     result = (content, None)
-    assert _extract_structured_content(result) == content
+    extracted = _extract_structured_content(result)
+    assert extracted == {"config_dimension": {"category_id": 5019003}}
+
+
+def test_extract_structured_content_single_text_block_plain_text_returned_as_string():
+    """Single TextContent that isn't JSON → return raw text string (not list)."""
+    content = [{"type": "text", "text": "hello world"}]
+    result = (content, None)
+    extracted = _extract_structured_content(result)
+    assert extracted == "hello world"
+
+
+def test_extract_structured_content_single_json_array_text_block_auto_parses():
+    """JSON array (not just object) in a single text block also gets parsed."""
+    content = [{"type": "text", "text": '[{"id": 1}, {"id": 2}]'}]
+    result = (content, None)
+    extracted = _extract_structured_content(result)
+    assert extracted == [{"id": 1}, {"id": 2}]
+
+
+def test_extract_structured_content_multi_block_returns_content_list():
+    """Multi-block content (e.g. text + image) is returned as-is — LLM handles it."""
+    content = [
+        {"type": "text", "text": "see image"},
+        {"type": "image", "url": "https://example.com/img.png"},
+    ]
+    result = (content, None)
+    extracted = _extract_structured_content(result)
+    assert extracted == content
+
+
+def test_extract_structured_content_artifact_priority_over_text_parse():
+    """When BOTH structured_content AND parseable text exist, prefer structured."""
+    content = [{"type": "text", "text": '{"old": "value"}'}]
+    artifact = {"structured_content": {"new": "value"}}
+    result = (content, artifact)
+    assert _extract_structured_content(result) == {"new": "value"}
 
 
 def test_extract_structured_content_passes_through_string():
