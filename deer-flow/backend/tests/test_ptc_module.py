@@ -35,9 +35,27 @@ def test_restricted_builtins_has_common_iterables():
 
 def test_restricted_builtins_excludes_dangerous_functions():
     b = _restricted_builtins()
-    for name in ["__import__", "eval", "exec", "compile", "open",
+    for name in ["eval", "exec", "compile", "open",
                  "input", "globals", "locals", "vars"]:
         assert name not in b, f"{name} must not be in restricted builtins"
+
+
+def test_restricted_builtins_provides_whitelisted_import():
+    """__import__ is provided but restricted to safe modules only.
+
+    LLM-generated code often writes `import json` out of habit even though
+    json is pre-imported. The restricted __import__ lets that work while
+    still blocking dangerous modules.
+    """
+    b = _restricted_builtins()
+    assert "__import__" in b
+    import json
+    # Importing a safe module returns the pre-imported instance
+    assert b["__import__"]("json") is json
+    # Importing a dangerous module raises
+    import pytest as _pytest
+    with _pytest.raises(ImportError, match="Cannot import 'os'"):
+        b["__import__"]("os")
 
 
 # ---------- _safe_modules ----------
@@ -89,8 +107,43 @@ def test_execute_code_returns_error_message_on_exception():
 
 
 def test_execute_code_blocks_import_os():
+    """Importing a blocked module produces a clear, actionable error."""
     result = _execute_code("import os\nprint(os.listdir('/'))", resolved_tools=[], runtime=None)
-    assert "error" in result.lower() or "Error" in result
+    assert "Cannot import 'os'" in result
+    # Error message should mention the safe alternatives
+    assert "json" in result and "re" in result
+
+
+def test_execute_code_allows_import_json():
+    """LLM-generated code that writes `import json` should work, because
+    json is pre-imported and the restricted __import__ returns it.
+
+    Regression: thread 7c1e03b4 step 25 — LLM wrote `import json` and got
+    `ImportError: __import__ not found` which was confusing and caused retries.
+    """
+    result = _execute_code(
+        "import json\nprint(json.dumps({'ok': True}))",
+        resolved_tools=[],
+        runtime=None,
+    )
+    assert result.strip() == '{"ok": true}'
+
+
+def test_execute_code_allows_from_import_of_safe_module():
+    """`from json import dumps` should also work — Python pulls the attribute
+    from whatever __import__ returns, which is the real json module."""
+    result = _execute_code(
+        "from json import dumps\nprint(dumps({'x': 1}))",
+        resolved_tools=[],
+        runtime=None,
+    )
+    assert result.strip() == '{"x": 1}'
+
+
+def test_execute_code_blocks_import_subprocess():
+    """Another blocked module — message should still mention the whitelist."""
+    result = _execute_code("import subprocess", resolved_tools=[], runtime=None)
+    assert "Cannot import 'subprocess'" in result
 
 
 def test_execute_code_blocks_open():

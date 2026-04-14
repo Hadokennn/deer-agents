@@ -24,11 +24,47 @@ _DEFAULT_MAX_OUTPUT = 20000
 # ---------- Safety primitives ----------
 
 
+def _restricted_import(
+    name: str,
+    globals=None,
+    locals=None,
+    fromlist=(),
+    level: int = 0,
+):
+    """Whitelisted __import__ for PTC code.
+
+    Only modules in `_safe_modules()` can be imported. Everything else
+    raises ImportError with a clear, actionable message pointing the LLM
+    at the pre-imported modules.
+
+    This lets LLM code use either style interchangeably:
+    - `import json` → works, `json` already in namespace but import is idempotent
+    - `from json import dumps` → works, pulls attribute from the returned module
+    - `import os` → ImportError with helpful message
+    """
+    safe = _safe_modules()
+    # Accept top-level names only (e.g. "json"); reject submodule imports
+    # like "json.decoder" since we don't pre-import those.
+    root = name.split(".", 1)[0]
+    if root in safe:
+        return safe[root]
+    raise ImportError(
+        f"Cannot import '{name}' in PTC code execution. "
+        f"Pre-imported and directly usable (no import needed): "
+        f"{', '.join(sorted(safe))}. "
+        f"Filesystem / network / process modules are not available."
+    )
+
+
 def _restricted_builtins() -> dict:
     """Return a mapping of safe Python built-ins for the exec namespace.
 
-    Excludes dangerous functions like __import__, eval, exec, open, which
-    would let LLM-generated code escape the sandbox restrictions.
+    Excludes dangerous functions like eval, exec, open, which would let
+    LLM-generated code escape the sandbox restrictions.
+
+    `__import__` is provided as a whitelisted wrapper (`_restricted_import`)
+    so `import json` and friends work for pre-imported safe modules; any
+    other import raises a clear ImportError.
     """
     allowed = {
         # I/O
@@ -49,9 +85,12 @@ def _restricted_builtins() -> dict:
         "chr", "ord",
         # Exceptions (so try/except works inside the namespace)
         "StopIteration", "ValueError", "TypeError", "KeyError", "IndexError",
-        "AttributeError", "RuntimeError", "Exception",
+        "AttributeError", "RuntimeError", "Exception", "ImportError",
     }
-    return {k: getattr(builtins, k) for k in allowed if hasattr(builtins, k)}
+    result = {k: getattr(builtins, k) for k in allowed if hasattr(builtins, k)}
+    # Whitelisted __import__ so `import json` works for pre-imported safe modules
+    result["__import__"] = _restricted_import
+    return result
 
 
 def _safe_modules() -> dict:
