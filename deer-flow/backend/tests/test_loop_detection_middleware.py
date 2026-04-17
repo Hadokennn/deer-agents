@@ -500,3 +500,32 @@ class TestMergeOverlapping:
         mw = LoopDetectionMiddleware()
         result = mw._merge_overlapping([("h1", 0, 20), ("h2", 5, 10)])
         assert result == [({"h1", "h2"}, 0, 20)]
+
+
+class TestExpandForToolMessages:
+    def test_no_trailing_tool_messages(self):
+        mw = LoopDetectionMiddleware()
+        msgs = [_ai("", [_tc("read_file", "/a", "c1")])]
+        # last AIMessage at idx 0; no following ToolMessages → end stays 0
+        assert mw._expand_for_tool_messages(msgs, tool_call_ids=set(), region_end=0) == 0
+
+    def test_absorbs_immediate_tool_messages(self):
+        mw = LoopDetectionMiddleware()
+        msgs = [
+            _ai("", [_tc("read_file", "/a", "c1")]),
+            _tm("err", "c1"),
+            _tm("err2", "c1"),  # second response (rare but possible)
+        ]
+        # tool_call_ids in region: {"c1"}
+        result = mw._expand_for_tool_messages(msgs, tool_call_ids={"c1"}, region_end=0)
+        assert result == 2
+
+    def test_stops_at_unrelated_message(self):
+        mw = LoopDetectionMiddleware()
+        msgs = [
+            _ai("", [_tc("read_file", "/a", "c1")]),
+            _tm("err", "c1"),
+            _ai("unrelated", [_tc("ls", "/x", "c2")]),
+        ]
+        result = mw._expand_for_tool_messages(msgs, tool_call_ids={"c1"}, region_end=0)
+        assert result == 1   # stops before the unrelated AIMessage at idx 2

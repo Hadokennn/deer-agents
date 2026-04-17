@@ -110,6 +110,28 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         ]
         return sorted(loops, key=lambda t: t[1])
 
+    def _expand_for_tool_messages(
+        self,
+        messages: list,
+        tool_call_ids: set[str],
+        region_end: int,
+    ) -> int:
+        """Walk forward from region_end absorbing ToolMessages whose tool_call_id
+        is in tool_call_ids. Stops at the first non-matching message.
+
+        Returns the new (inclusive) end index.
+        """
+        from langchain_core.messages import ToolMessage as _ToolMessage
+
+        i = region_end + 1
+        while i < len(messages):
+            msg = messages[i]
+            if isinstance(msg, _ToolMessage) and getattr(msg, "tool_call_id", None) in tool_call_ids:
+                i += 1
+                continue
+            break
+        return i - 1
+
     def _merge_overlapping(
         self, regions: list[tuple[str, int, int]]
     ) -> list[tuple[set[str], int, int]]:
