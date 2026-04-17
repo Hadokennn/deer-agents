@@ -639,3 +639,41 @@ class TestObservabilityDedup:
             r for r in caplog.records if "loop.rewind.first_detected" in r.message
         ]
         assert len(first_detected) == 2
+
+
+class TestEndToEndPatching:
+    def test_realistic_oncall_loop_scenario(self):
+        """Simulates oncall agent reading the same file 3 times with errors."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+
+        # Build a 10-message history: 1 user query + 3 loop iterations + 3 prior unrelated tool calls
+        msgs = [
+            HumanMessage(content="Why is the foo service slow?"),
+            _ai("Let me check the deploy log first.", [_tc("read_file", "/log", "p1")]),
+            _tm("Recent deploys: ...", "p1"),
+            _ai("Now I'll inspect the service code.", [_tc("read_file", "/foo.py", "p2")]),
+            _tm("Error: file not found", "p2"),
+            _ai("Try absolute path.", [_tc("read_file", "/foo.py", "p3")]),
+            _tm("Error: file not found", "p3"),
+            _ai("Hmm, try once more.", [_tc("read_file", "/foo.py", "p4")]),
+            _tm("Error: file not found", "p4"),
+        ]
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="next-response")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        # Pre-loop messages preserved (HumanMessage + first 2 AI/Tool pair)
+        assert isinstance(patched[0], HumanMessage)
+        assert "foo service" in patched[0].content
+        assert isinstance(patched[1], AIMessage)
+        assert "deploy log" in patched[1].content
+        assert isinstance(patched[2], ToolMessage)
+        # Loop region (msgs[3..8]) collapsed to single hint
+        hint_msg = patched[3]
+        assert isinstance(hint_msg, HumanMessage)
+        assert "[LOOP RECOVERY]" in hint_msg.content
+        assert "/foo.py" in hint_msg.content
+        # Total length: 3 preserved + 1 hint = 4
+        assert len(patched) == 4
