@@ -792,3 +792,53 @@ class TestDetectorPriority:
 
         # handler called with original request (no patching)
         req.override.assert_not_called()
+
+
+class TestEndToEndNoProgress:
+    def test_realistic_aimless_exploration(self):
+        """Simulates oncall agent reading many different files without forming a hypothesis."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+
+        msgs = [
+            HumanMessage(content="Investigate the 500 error in the payment service."),
+        ]
+        # 12 different read_file calls with only mechanical narration — no real thinking
+        for i in range(12):
+            msgs.append(_ai(f"Let me check file {i}.", [_tc("read_file", {"path": f"/svc/file{i}.py"}, f"c{i}")]))
+            msgs.append(_tm(f"# contents of file{i}\npass", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="response")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        # Pre-message user query preserved
+        assert isinstance(patched[0], HumanMessage)
+        assert "500 error" in patched[0].content
+        # Rest collapsed to one hint
+        assert isinstance(patched[1], HumanMessage)
+        assert "[NO PROGRESS]" in patched[1].content
+        assert len(patched) == 2
+
+    def test_hybrid_scenario_hash_loop_dominates(self):
+        """Mix of hash loop + no-progress signal — hash takes priority, no-progress deferred."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [HumanMessage(content="Find the bug")]
+        # Hash loop: 3 identical reads
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/dup.py", f"d{i}")]))
+            msgs.append(_tm("Error: not found", f"d{i}"))
+        # Plus more empty-content tool calls (would trigger V2.1 alone)
+        for i in range(12):
+            msgs.append(_ai("", [_tc("grep", {"path": f"/f{i}"}, f"g{i}")]))
+            msgs.append(_tm("", f"g{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        combined = "\n".join(m.content for m in patched if isinstance(m, HumanMessage))
+        # V1 hint wins
+        assert "[LOOP RECOVERY]" in combined
+        assert "[NO PROGRESS]" not in combined
