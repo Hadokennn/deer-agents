@@ -1742,6 +1742,601 @@ cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/test
 
 ---
 
+## Task 15: Add `_has_meaningful_text` and filler phrases (V2.1 foundation)
+
+**Files:**
+- Modify: `deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_hint_builder.py`
+- Modify: `deer-flow/backend/tests/test_loop_hint_builder.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `tests/test_loop_hint_builder.py`:
+
+```python
+from deerflow.agents.middlewares.loop_hint_builder import _has_meaningful_text
+
+
+class TestHasMeaningfulText:
+    def test_short_text_not_meaningful(self):
+        assert _has_meaningful_text("ok") is False
+        assert _has_meaningful_text("") is False
+        assert _has_meaningful_text(None) is False
+
+    def test_text_over_80_chars_meaningful(self):
+        text = "The stack trace points to a missing import. Let me check the module structure carefully."
+        assert _has_meaningful_text(text) is True
+
+    def test_filler_only_not_meaningful(self):
+        text = "Let me try this. I'll check the next file. Let me see."
+        assert _has_meaningful_text(text) is False
+
+    def test_filler_with_real_content_meaningful(self):
+        text = "Let me check the imports. The stack points at line 42 which suggests a race condition in the worker pool."
+        assert _has_meaningful_text(text) is True
+
+    def test_list_content_evaluated(self):
+        content = [
+            {"type": "text", "text": "The root cause appears to be a mismatched schema between service A and service B after the deploy."},
+        ]
+        assert _has_meaningful_text(content) is True
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_hint_builder.py::TestHasMeaningfulText -v`
+Expected: FAIL with `ImportError: cannot import name '_has_meaningful_text'`
+
+- [ ] **Step 3: Implement `_has_meaningful_text` and filler phrase list**
+
+Append to `loop_hint_builder.py`:
+
+```python
+_FILLER_PHRASES = (
+    "let me",
+    "i'll",
+    "i will",
+    "let's",
+    "now i'll",
+    "now let me",
+    "i need to",
+    "going to",
+    "next i'll",
+)
+
+_MEANINGFUL_MIN_CHARS = 80
+
+
+def _has_meaningful_text(content) -> bool:
+    """Return True if content contains substantive reasoning/conclusion text.
+
+    Signal definition:
+      - length >= _MEANINGFUL_MIN_CHARS (filter out filler like "ok", "trying...")
+      - NOT all sentences start with filler phrases (filter mechanical narration)
+    """
+    text = _extract_text(content).strip()
+    if len(text) < _MEANINGFUL_MIN_CHARS:
+        return False
+    sentences = [s.strip().lower() for s in text.split(".") if s.strip()]
+    if not sentences:
+        return False
+    all_filler = all(
+        any(s.startswith(p) for p in _FILLER_PHRASES) for s in sentences
+    )
+    if all_filler:
+        return False
+    return True
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_hint_builder.py -v`
+Expected: PASS — all tests pass (existing + 5 new)
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_hint_builder.py deer-flow/backend/tests/test_loop_hint_builder.py && git commit -m "feat(loop-detection): add _has_meaningful_text with filler phrase detection"
+```
+
+---
+
+## Task 16: Add `_detect_no_progress` method (V2.1 detector)
+
+**Files:**
+- Modify: `deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py`
+- Modify: `deer-flow/backend/tests/test_loop_detection_middleware.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `tests/test_loop_detection_middleware.py`:
+
+```python
+class TestDetectNoProgress:
+    def test_below_min_window_returns_none(self):
+        mw = LoopDetectionMiddleware()
+        # Only 5 AIMessages — below default min_window_to_trigger=10
+        msgs = []
+        for i in range(5):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        assert mw._detect_no_progress(msgs) is None
+
+    def test_meaningful_thinking_not_detected(self):
+        mw = LoopDetectionMiddleware()
+        msgs = []
+        for i in range(15):
+            content = f"Analyzing file {i}: the pattern suggests a race condition in the worker pool based on stack trace."
+            msgs.append(_ai(content, [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        assert mw._detect_no_progress(msgs) is None
+
+    def test_tool_only_no_progress_detected(self):
+        mw = LoopDetectionMiddleware()
+        msgs = []
+        for i in range(15):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))   # empty content
+            msgs.append(_tm("ok", f"c{i}"))
+        region = mw._detect_no_progress(msgs)
+        assert region is not None
+        start, end = region
+        # Should cover the AIMessage range (indices 0, 2, 4, ..., 28)
+        assert start == 0
+        assert end == 28
+
+    def test_mixed_but_mostly_no_progress(self):
+        mw = LoopDetectionMiddleware(
+            # allow triggering with 15 window + 0.85 ratio
+        )
+        msgs = []
+        # 13 no-progress + 2 meaningful = 13/15 = 86.6% > 85%
+        for i in range(13):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        for i in range(2):
+            meaningful = f"Based on the data seen so far, the bug appears to be in module X because the stack trace clearly shows the failure point at line 42."
+            msgs.append(_ai(meaningful, [_tc("read_file", f"/g{i}", f"g{i}")]))
+            msgs.append(_tm("ok", f"g{i}"))
+        region = mw._detect_no_progress(msgs)
+        assert region is not None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_detection_middleware.py::TestDetectNoProgress -v`
+Expected: FAIL with `AttributeError: ... no attribute '_detect_no_progress'`
+
+- [ ] **Step 3: Implement `_detect_no_progress`**
+
+Add import at top of `loop_detection_middleware.py`:
+
+```python
+from deerflow.agents.middlewares.loop_hint_builder import _has_meaningful_text, build_rule_hint
+```
+
+Add to `LoopDetectionMiddleware` class:
+
+```python
+    def _detect_no_progress(
+        self,
+        messages: list,
+        window: int = 15,
+        min_window_to_trigger: int = 10,
+        no_progress_ratio: float = 0.85,
+    ) -> tuple[int, int] | None:
+        """V2.1 detector: detects "lots of tool calls with no meaningful thinking".
+
+        Returns (patch_start_idx, patch_end_idx) of the AIMessage range to patch,
+        or None if not triggered.
+        """
+        recent_ai_with_idx: list[tuple[int, AIMessage]] = []
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], AIMessage):
+                recent_ai_with_idx.append((i, messages[i]))
+                if len(recent_ai_with_idx) >= window:
+                    break
+        if len(recent_ai_with_idx) < min_window_to_trigger:
+            return None
+
+        recent_ai_with_idx.reverse()
+
+        no_progress = sum(
+            1 for _, ai in recent_ai_with_idx
+            if getattr(ai, "tool_calls", None)
+            and not _has_meaningful_text(ai.content)
+        )
+        if no_progress / len(recent_ai_with_idx) < no_progress_ratio:
+            return None
+
+        patch_start = recent_ai_with_idx[0][0]
+        patch_end = recent_ai_with_idx[-1][0]
+        return patch_start, patch_end
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_detection_middleware.py::TestDetectNoProgress -v`
+Expected: PASS — 4 tests pass
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py deer-flow/backend/tests/test_loop_detection_middleware.py && git commit -m "feat(loop-detection): add _detect_no_progress V2.1 detector"
+```
+
+---
+
+## Task 17: Add `build_no_progress_hint` function
+
+**Files:**
+- Modify: `deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_hint_builder.py`
+- Modify: `deer-flow/backend/tests/test_loop_hint_builder.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `tests/test_loop_hint_builder.py`:
+
+```python
+from deerflow.agents.middlewares.loop_hint_builder import build_no_progress_hint
+
+
+class TestBuildNoProgressHint:
+    def test_contains_no_progress_header(self):
+        msgs = []
+        for i in range(10):
+            msgs.append(_ai("", [_tc("read_file", {"path": f"/f{i}"}, f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        hint = build_no_progress_hint(msgs, start=0, end=len(msgs) - 1)
+        assert "[NO PROGRESS]" in hint
+        assert "tool calls" in hint
+
+    def test_contains_three_choices(self):
+        msgs = [_ai("", [_tc("read_file", {"path": "/a"}, "c1")])]
+        hint = build_no_progress_hint(msgs, start=0, end=0)
+        assert "(a)" in hint
+        assert "(b)" in hint
+        assert "(c)" in hint
+
+    def test_mentions_tool_call_count(self):
+        msgs = []
+        for i in range(7):
+            msgs.append(_ai("", [_tc("read_file", {"path": f"/f{i}"}, f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        hint = build_no_progress_hint(msgs, start=0, end=len(msgs) - 1)
+        # Should mention 7 tool calls in the region
+        assert "7" in hint
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_hint_builder.py::TestBuildNoProgressHint -v`
+Expected: FAIL with `ImportError: cannot import name 'build_no_progress_hint'`
+
+- [ ] **Step 3: Implement `build_no_progress_hint`**
+
+Append to `loop_hint_builder.py`:
+
+```python
+def build_no_progress_hint(messages: list, start: int, end: int) -> str:
+    """Build hint for V2.1 no-progress detection.
+
+    Counts tool-call-bearing AIMessages in the region; produces an actionable
+    three-choice prompt guiding the model out of exploratory paralysis.
+    """
+    tool_call_turns = sum(
+        1
+        for m in messages[start : end + 1]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+    )
+
+    return (
+        f"[NO PROGRESS] You've made {tool_call_turns} tool calls in recent turns "
+        "without forming a hypothesis, conclusion, or progress statement.\n\n"
+        "Stop exploring. Choose:\n"
+        "  (a) commit to ONE specific approach and pursue it\n"
+        "  (b) summarize what you know and produce a final answer\n"
+        "  (c) explicitly state why the task may not be solvable with available tools"
+    )
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_hint_builder.py -v`
+Expected: PASS — all tests pass
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_hint_builder.py deer-flow/backend/tests/test_loop_hint_builder.py && git commit -m "feat(loop-detection): add build_no_progress_hint for V2.1 detector"
+```
+
+---
+
+## Task 18: Wire V2.1 into `wrap_model_call` priority chain
+
+**Files:**
+- Modify: `deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py`
+- Modify: `deer-flow/backend/tests/test_loop_detection_middleware.py`
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `tests/test_loop_detection_middleware.py`:
+
+```python
+from deerflow.agents.middlewares.loop_hint_builder import build_no_progress_hint
+
+
+class TestDetectorPriority:
+    def test_hash_loop_takes_priority_over_no_progress(self):
+        """When both V1 and V2.1 would trigger, V1 wins (more specific)."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        # V1 hash loop: 3 identical tool calls
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/same", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        # Extend to trigger V2.1 as well: more empty-content tool-call AIMessages
+        for i in range(12):
+            msgs.append(_ai("", [_tc("grep", {"path": f"/f{i}"}, f"g{i}")]))
+            msgs.append(_tm("ok", f"g{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        # V1 hint (has "[LOOP RECOVERY]") should appear, not V2.1 hint ("[NO PROGRESS]")
+        patched = req._captured["messages"]
+        combined = "\n".join(
+            m.content for m in patched if isinstance(m, HumanMessage)
+        )
+        assert "[LOOP RECOVERY]" in combined
+        assert "[NO PROGRESS]" not in combined
+
+    def test_no_progress_fires_when_no_hash_loop(self):
+        """V2.1 fallback triggers when V1 detects nothing."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        # 15 distinct tool calls, no hash loop, no meaningful thinking
+        for i in range(15):
+            msgs.append(_ai("", [_tc("read_file", {"path": f"/f{i}"}, f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        combined = "\n".join(
+            m.content for m in patched if isinstance(m, HumanMessage)
+        )
+        assert "[NO PROGRESS]" in combined
+        assert "[LOOP RECOVERY]" not in combined
+
+    def test_neither_fires_on_healthy_thread(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(5):
+            content = (
+                f"Looking at step {i}: the investigation suggests a latency spike in the "
+                f"queue worker based on profiler data from the previous call."
+            )
+            msgs.append(_ai(content, [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        # handler called with original request (no patching)
+        req.override.assert_not_called()
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_detection_middleware.py::TestDetectorPriority -v`
+Expected: FAIL — V2.1 not wired into wrap_model_call yet
+
+- [ ] **Step 3: Update `wrap_model_call` and `awrap_model_call` with priority chain**
+
+Replace the two hook implementations in `loop_detection_middleware.py`:
+
+```python
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        patched = self._compute_patched_messages(request)
+        if patched is not None:
+            request = request.override(messages=patched)
+        return handler(request)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        patched = self._compute_patched_messages(request)
+        if patched is not None:
+            request = request.override(messages=patched)
+        return await handler(request)
+```
+
+Add a new method that encapsulates the priority chain:
+
+```python
+    def _compute_patched_messages(self, request: ModelRequest) -> list | None:
+        """Run detectors in priority order; return patched messages or None.
+
+        Priority: V1 hash-based first (most specific), then V2.1 no-progress (general).
+        """
+        messages = request.messages
+        thread_id = self._get_thread_id_from_request(request)
+
+        # V1: hash-based detection
+        loops = self._detect_all_loops(messages)
+        if loops:
+            merged = self._merge_overlapping(loops)
+            for hashes, start, end in merged:
+                for h in hashes:
+                    if h not in self._reported_loops[thread_id]:
+                        self._reported_loops[thread_id].add(h)
+                        logger.warning(
+                            "loop.rewind.first_detected",
+                            extra={
+                                "thread_id": thread_id,
+                                "loop_hash": h,
+                                "loop_start_idx": start,
+                                "loop_end_idx": end,
+                                "detector": "v1_hash",
+                            },
+                        )
+            return self._apply_patches_to_merged(messages, merged)
+
+        # V2.1: no-progress fallback
+        np_region = self._detect_no_progress(messages)
+        if np_region is not None:
+            start, end = np_region
+            np_key = "v2_no_progress"   # coarse per-thread dedup key
+            if np_key not in self._reported_loops[thread_id]:
+                self._reported_loops[thread_id].add(np_key)
+                logger.warning(
+                    "loop.rewind.first_detected",
+                    extra={
+                        "thread_id": thread_id,
+                        "patch_start": start,
+                        "patch_end": end,
+                        "detector": "v2_no_progress",
+                    },
+                )
+            tc_ids = self._collect_tool_call_ids_in_range(messages, start, end)
+            expanded_end = self._expand_for_tool_messages(messages, tc_ids, end)
+            hint = build_no_progress_hint(messages, start, expanded_end)
+            return (
+                messages[:start]
+                + [HumanMessage(content=hint)]
+                + messages[expanded_end + 1 :]
+            )
+
+        return None
+
+    def _apply_patches_to_merged(
+        self,
+        messages: list,
+        merged: list[tuple[set[str], int, int]],
+    ) -> list:
+        """Apply V1 hash-based patches from end to start to preserve indices."""
+        patched = list(messages)
+        for hashes, start, end in sorted(merged, key=lambda r: -r[1]):
+            tc_ids = self._collect_tool_call_ids_in_range(patched, start, end)
+            expanded_end = self._expand_for_tool_messages(patched, tc_ids, end)
+            hint = build_rule_hint(patched, start, expanded_end)
+            patched = patched[:start] + [HumanMessage(content=hint)] + patched[expanded_end + 1 :]
+        return patched
+```
+
+Add import for `build_no_progress_hint`:
+
+```python
+from deerflow.agents.middlewares.loop_hint_builder import (
+    _has_meaningful_text,
+    build_no_progress_hint,
+    build_rule_hint,
+)
+```
+
+- [ ] **Step 4: Run all middleware tests**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_detection_middleware.py tests/test_loop_hint_builder.py tests/test_loop_hash.py -v`
+Expected: all pass, including 3 new priority tests
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py deer-flow/backend/tests/test_loop_detection_middleware.py && git commit -m "feat(loop-detection): wire V2.1 no-progress detector into priority chain"
+```
+
+---
+
+## Task 19: End-to-end test for realistic V2.1 scenario
+
+**Files:**
+- Modify: `deer-flow/backend/tests/test_loop_detection_middleware.py`
+
+- [ ] **Step 1: Add realistic no-progress oncall scenario**
+
+Add to `tests/test_loop_detection_middleware.py`:
+
+```python
+class TestEndToEndNoProgress:
+    def test_realistic_aimless_exploration(self):
+        """Simulates oncall agent reading many different files without forming a hypothesis."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+
+        msgs = [
+            HumanMessage(content="Investigate the 500 error in the payment service."),
+        ]
+        # 12 different read_file calls with only mechanical narration — no real thinking
+        for i in range(12):
+            msgs.append(_ai(f"Let me check file {i}.", [_tc("read_file", {"path": f"/svc/file{i}.py"}, f"c{i}")]))
+            msgs.append(_tm(f"# contents of file{i}\npass", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="response")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        # Pre-message user query preserved
+        assert isinstance(patched[0], HumanMessage)
+        assert "500 error" in patched[0].content
+        # Rest collapsed to one hint
+        assert isinstance(patched[1], HumanMessage)
+        assert "[NO PROGRESS]" in patched[1].content
+        assert len(patched) == 2
+
+    def test_hybrid_scenario_hash_loop_dominates(self):
+        """Mix of hash loop + no-progress signal — hash takes priority, no-progress deferred."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [HumanMessage(content="Find the bug")]
+        # Hash loop: 3 identical reads
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/dup.py", f"d{i}")]))
+            msgs.append(_tm("Error: not found", f"d{i}"))
+        # Plus more empty-content tool calls (would trigger V2.1 alone)
+        for i in range(12):
+            msgs.append(_ai("", [_tc("grep", {"path": f"/f{i}"}, f"g{i}")]))
+            msgs.append(_tm("", f"g{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        combined = "\n".join(m.content for m in patched if isinstance(m, HumanMessage))
+        # V1 hint wins
+        assert "[LOOP RECOVERY]" in combined
+        assert "[NO PROGRESS]" not in combined
+```
+
+- [ ] **Step 2: Run tests**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_detection_middleware.py::TestEndToEndNoProgress -v`
+Expected: PASS — 2 end-to-end tests pass
+
+- [ ] **Step 3: Run full test suite one last time**
+
+Run: `cd deer-flow/backend && uv run pytest tests/test_loop_hash.py tests/test_loop_hint_builder.py tests/test_loop_detection_middleware.py -v --tb=short`
+Expected: all pass
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /Users/bytedance/Documents/aime/deer-agents && git add deer-flow/backend/tests/test_loop_detection_middleware.py && git commit -m "test(loop-detection): add end-to-end V2.1 no-progress scenarios"
+```
+
+---
+
 ## Self-Review Notes
 
 Reviewed against `docs/superpowers/specs/2026-04-16-loop-detection-rewind-design.md`:
@@ -1765,12 +2360,18 @@ Reviewed against `docs/superpowers/specs/2026-04-16-loop-detection-rewind-design
 | KV cache friendliness | Implicit (deterministic hint, stable patching) |
 
 **Out of scope (V2, not in this plan):**
-- V2.1 no-progress detector
 - V2.2 periodic detector
 - V2.3 judge-based hint
 - V2.5 tool-spam detector
-- V2.4 detector chain orchestration
+- V2.4 full detector chain orchestration (V1 hash + V2.1 wired in Tasks 18; periodic/tool-spam deferred)
 - Metrics emission (logging is in scope; Prometheus counters defer)
+
+**V2.1 no-progress coverage (Tasks 15-19):**
+- Task 15: `_has_meaningful_text` helper + filler phrase detection
+- Task 16: `_detect_no_progress` method (ratio-based window scan)
+- Task 17: `build_no_progress_hint` (three-choice action prompt)
+- Task 18: priority chain wiring (V1 hash → V2.1 no-progress → None)
+- Task 19: end-to-end scenarios (aimless exploration + hybrid with hash loop)
 
 **Placeholder scan:** No TBD/TODO/vague-handling steps. Each step has either runnable test code, runnable implementation code, or an exact command + expected output.
 
