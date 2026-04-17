@@ -156,7 +156,7 @@ class TestLoopDetection:
         assert result is None
 
     def test_below_threshold_returns_none(self):
-        mw = LoopDetectionMiddleware(warn_threshold=3)
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -165,43 +165,8 @@ class TestLoopDetection:
             result = mw._apply(_make_state(tool_calls=call), runtime)
             assert result is None
 
-    def test_warn_at_threshold(self):
-        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
-        runtime = _make_runtime()
-        call = [_bash_call("ls")]
-
-        for _ in range(2):
-            mw._apply(_make_state(tool_calls=call), runtime)
-
-        # Third identical call triggers warning
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is not None
-        msgs = result["messages"]
-        assert len(msgs) == 1
-        assert isinstance(msgs[0], HumanMessage)
-        assert "LOOP DETECTED" in msgs[0].content
-
-    def test_warn_only_injected_once(self):
-        """Warning for the same hash should only be injected once per thread."""
-        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
-        runtime = _make_runtime()
-        call = [_bash_call("ls")]
-
-        # First two — no warning
-        for _ in range(2):
-            mw._apply(_make_state(tool_calls=call), runtime)
-
-        # Third — warning injected
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
-
-        # Fourth — warning already injected, should return None
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is None
-
     def test_hard_stop_at_limit(self):
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        mw = LoopDetectionMiddleware(rewind_threshold=2, hard_limit=4)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -219,7 +184,7 @@ class TestLoopDetection:
         assert _HARD_STOP_MSG in msgs[0].content
 
     def test_different_calls_dont_trigger(self):
-        mw = LoopDetectionMiddleware(warn_threshold=2)
+        mw = LoopDetectionMiddleware(rewind_threshold=2)
         runtime = _make_runtime()
 
         # Each call is different
@@ -228,7 +193,7 @@ class TestLoopDetection:
             assert result is None
 
     def test_window_sliding(self):
-        mw = LoopDetectionMiddleware(warn_threshold=3, window_size=5)
+        mw = LoopDetectionMiddleware(rewind_threshold=3, window_size=5)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -245,7 +210,7 @@ class TestLoopDetection:
         assert result is None
 
     def test_reset_clears_state(self):
-        mw = LoopDetectionMiddleware(warn_threshold=2)
+        mw = LoopDetectionMiddleware(rewind_threshold=2)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -270,31 +235,9 @@ class TestLoopDetection:
         result = mw._apply({"messages": []}, runtime)
         assert result is None
 
-    def test_thread_id_from_runtime_context(self):
-        """Thread ID should come from runtime.context, not state."""
-        mw = LoopDetectionMiddleware(warn_threshold=2)
-        runtime_a = _make_runtime("thread-A")
-        runtime_b = _make_runtime("thread-B")
-        call = [_bash_call("ls")]
-
-        # One call on thread A
-        mw._apply(_make_state(tool_calls=call), runtime_a)
-        # One call on thread B
-        mw._apply(_make_state(tool_calls=call), runtime_b)
-
-        # Second call on thread A — triggers warning (2 >= warn_threshold)
-        result = mw._apply(_make_state(tool_calls=call), runtime_a)
-        assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
-
-        # Second call on thread B — also triggers (independent tracking)
-        result = mw._apply(_make_state(tool_calls=call), runtime_b)
-        assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
-
     def test_lru_eviction(self):
         """Old threads should be evicted when max_tracked_threads is exceeded."""
-        mw = LoopDetectionMiddleware(warn_threshold=2, max_tracked_threads=3)
+        mw = LoopDetectionMiddleware(rewind_threshold=2, max_tracked_threads=3)
         call = [_bash_call("ls")]
 
         # Fill up 3 threads
@@ -319,7 +262,7 @@ class TestLoopDetection:
 
     def test_fallback_thread_id_when_missing(self):
         """When runtime context has no thread_id, should use 'default'."""
-        mw = LoopDetectionMiddleware(warn_threshold=2)
+        mw = LoopDetectionMiddleware(rewind_threshold=2)
         runtime = MagicMock()
         runtime.context = {}
         call = [_bash_call("ls")]
@@ -381,7 +324,7 @@ class TestHardStopWithListContent:
 
     def test_hard_stop_with_list_content(self):
         """Hard stop on list content should not raise TypeError (regression)."""
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        mw = LoopDetectionMiddleware(rewind_threshold=2, hard_limit=4)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -408,7 +351,7 @@ class TestHardStopWithListContent:
 
     def test_hard_stop_with_none_content(self):
         """Hard stop on None content should produce a plain string."""
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        mw = LoopDetectionMiddleware(rewind_threshold=2, hard_limit=4)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 
@@ -424,7 +367,7 @@ class TestHardStopWithListContent:
 
     def test_hard_stop_with_str_content(self):
         """Hard stop on str content should concatenate the stop message."""
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        mw = LoopDetectionMiddleware(rewind_threshold=2, hard_limit=4)
         runtime = _make_runtime()
         call = [_bash_call("ls")]
 

@@ -4,17 +4,21 @@ P0 safety: prevents the agent from calling the same tool with the same
 arguments indefinitely until the recursion limit kills the run.
 
 Detection strategy:
-  1. After each model response, hash the tool calls (name + args).
-  2. Track recent hashes in a sliding window.
-  3. If the same hash appears >= warn_threshold times, inject a
-     "you are repeating yourself — wrap up" system message (once per hash).
-  4. If it appears >= hard_limit times, strip all tool_calls from the
-     response so the agent is forced to produce a final text answer.
+  1. View-layer patching (wrap_model_call): detect loops in the message
+     history and replace the looping region with a [LOOP RECOVERY] hint
+     before the model sees it.
+  2. Hard-stop safety net (after_model): if the same tool-call hash appears
+     >= hard_limit times in the sliding window, strip all tool_calls from
+     the response so the agent is forced to produce a final text answer.
+
+Note: the warn tier (additive HumanMessage at warn_threshold) was removed
+in favor of (1). The ``warn_threshold`` constructor parameter is retained
+for backwards compatibility and scheduled for removal in a follow-up task.
 """
 
 import logging
 import threading
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -77,7 +81,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._lock = threading.Lock()
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
-        self._warned: dict[str, set[str]] = defaultdict(set)
 
     def _detect_all_loops(self, messages: list) -> list[tuple[str, int, int]]:
         """Find all tool-call hashes that meet rewind_threshold in messages.
@@ -202,14 +205,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """
         while len(self._history) > self.max_tracked_threads:
             evicted_id, _ = self._history.popitem(last=False)
-            self._warned.pop(evicted_id, None)
             logger.debug("Evicted loop tracking for thread %s (LRU)", evicted_id)
 
     def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
-        """Track tool calls and check for loops.
+        """Track tool calls and return (hard_stop_msg_or_none, should_hard_stop).
 
-        Returns:
-            (warning_message_or_none, should_hard_stop)
+        Note: warn tier removed in favor of wrap_model_call view patching.
+        Only the hard_stop safety net remains in after_model.
         """
         messages = state.get("messages", [])
         if not messages:
@@ -224,10 +226,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return None, False
 
         thread_id = self._get_thread_id(runtime)
-        call_hash = _hash_tool_calls(tool_calls)
+        try:
+            call_hash = _hash_tool_calls(tool_calls)
+        except Exception:
+            return None, False
 
         with self._lock:
-            # Touch / create entry (move to end for LRU)
             if thread_id in self._history:
                 self._history.move_to_end(thread_id)
             else:
@@ -244,7 +248,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
             if count >= self.hard_limit:
                 logger.error(
-                    "Loop hard limit reached — forcing stop",
+                    "Loop hard limit reached - forcing stop",
                     extra={
                         "thread_id": thread_id,
                         "call_hash": call_hash,
@@ -253,23 +257,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     },
                 )
                 return _HARD_STOP_MSG, True
-
-            if count >= self.warn_threshold:
-                warned = self._warned[thread_id]
-                if call_hash not in warned:
-                    warned.add(call_hash)
-                    logger.warning(
-                        "Repetitive tool calls detected — injecting warning",
-                        extra={
-                            "thread_id": thread_id,
-                            "call_hash": call_hash,
-                            "count": count,
-                            "tools": tool_names,
-                        },
-                    )
-                    return _WARNING_MSG, False
-                # Warning already injected for this hash — suppress
-                return None, False
 
         return None, False
 
@@ -291,10 +278,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return str(content) + f"\n\n{text}"
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
-        warning, hard_stop = self._track_and_check(state, runtime)
+        _, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
-            # Strip tool_calls from the last AIMessage to force text output
             messages = state.get("messages", [])
             last_msg = messages[-1]
             stripped_msg = last_msg.model_copy(
@@ -304,15 +290,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 }
             )
             return {"messages": [stripped_msg]}
-
-        if warning:
-            # Inject as HumanMessage instead of SystemMessage to avoid
-            # Anthropic's "multiple non-consecutive system messages" error.
-            # Anthropic models require system messages only at the start of
-            # the conversation; injecting one mid-conversation crashes
-            # langchain_anthropic's _format_messages(). HumanMessage works
-            # with all providers. See #1299.
-            return {"messages": [HumanMessage(content=warning)]}
 
         return None
 
@@ -351,7 +328,5 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             if thread_id:
                 self._history.pop(thread_id, None)
-                self._warned.pop(thread_id, None)
             else:
                 self._history.clear()
-                self._warned.clear()
