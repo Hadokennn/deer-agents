@@ -47,10 +47,11 @@ def _bash_call(cmd="ls"):
     return {"name": "bash", "id": f"call_{cmd}", "args": {"command": cmd}}
 
 
-def _model_request(messages):
+def _model_request(messages, thread_id="test-thread"):
     """Build a minimal ModelRequest for wrap_model_call testing."""
     req = MagicMock(spec=ModelRequest)
     req.messages = messages
+    req.runtime = _make_runtime(thread_id=thread_id)
     captured = {}
 
     def fake_override(messages):
@@ -568,3 +569,73 @@ class TestWrapModelCall:
         assert len(patched) == 1
         assert "[LOOP RECOVERY]" in patched[0].content
         handler.assert_called_once()
+
+
+class TestObservabilityDedup:
+    def test_first_detection_logs_warning(self, caplog):
+        import logging
+        caplog.set_level(
+            logging.WARNING,
+            logger="deerflow.agents.middlewares.loop_detection_middleware",
+        )
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+
+        mw.wrap_model_call(req, handler)
+
+        first_detected = [
+            r for r in caplog.records if "loop.rewind.first_detected" in r.message
+        ]
+        assert len(first_detected) == 1
+
+    def test_subsequent_calls_silent(self, caplog):
+        import logging
+        caplog.set_level(
+            logging.WARNING,
+            logger="deerflow.agents.middlewares.loop_detection_middleware",
+        )
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+
+        # Set up runtime context so middleware can extract thread_id
+        for _ in range(5):
+            req = _model_request(msgs)
+            req.runtime = _make_runtime(thread_id="t1")
+            handler = MagicMock(return_value="r")
+            mw.wrap_model_call(req, handler)
+
+        first_detected = [
+            r for r in caplog.records if "loop.rewind.first_detected" in r.message
+        ]
+        assert len(first_detected) == 1   # only first call logs
+
+    def test_different_threads_each_log_once(self, caplog):
+        import logging
+        caplog.set_level(
+            logging.WARNING,
+            logger="deerflow.agents.middlewares.loop_detection_middleware",
+        )
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+
+        for thread_id in ("t1", "t2"):
+            req = _model_request(msgs)
+            req.runtime = _make_runtime(thread_id=thread_id)
+            handler = MagicMock(return_value="r")
+            mw.wrap_model_call(req, handler)
+
+        first_detected = [
+            r for r in caplog.records if "loop.rewind.first_detected" in r.message
+        ]
+        assert len(first_detected) == 2

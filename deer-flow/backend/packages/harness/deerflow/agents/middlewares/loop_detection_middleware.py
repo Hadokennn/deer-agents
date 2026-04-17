@@ -18,7 +18,7 @@ for backwards compatibility and scheduled for removal in a follow-up task.
 
 import logging
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -81,6 +81,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._lock = threading.Lock()
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
+        # Observation-only dedup cache: tracks (thread_id, loop_hash) reported once.
+        # Pure optimization — clearing it only causes some loops to be re-reported,
+        # never affects patching behavior.
+        self._reported_loops: dict[str, set[str]] = defaultdict(set)
 
     def _detect_all_loops(self, messages: list) -> list[tuple[str, int, int]]:
         """Find all tool-call hashes that meet rewind_threshold in messages.
@@ -170,6 +174,21 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         ids.add(tc_id)
         return ids
 
+    def _apply_patches_to_merged(
+        self, messages: list, merged: list[tuple[set[str], int, int]]
+    ) -> list:
+        """Apply patches for pre-merged loop regions from end to start.
+
+        Returns a new list (does not mutate input).
+        """
+        patched = list(messages)
+        for hashes, start, end in sorted(merged, key=lambda r: -r[1]):
+            tc_ids = self._collect_tool_call_ids_in_range(patched, start, end)
+            expanded_end = self._expand_for_tool_messages(patched, tc_ids, end)
+            hint = build_rule_hint(patched, start, expanded_end)
+            patched = patched[:start] + [HumanMessage(content=hint)] + patched[expanded_end + 1 :]
+        return patched
+
     def _apply_all_patches(self, messages: list) -> list:
         """Detect all loops, merge overlapping, apply patches from end to start.
 
@@ -180,16 +199,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return list(messages)
 
         merged = self._merge_overlapping(loops)
-
-        # Process from end to start to keep earlier indices valid
-        patched = list(messages)
-        for hashes, start, end in sorted(merged, key=lambda r: -r[1]):
-            tc_ids = self._collect_tool_call_ids_in_range(patched, start, end)
-            expanded_end = self._expand_for_tool_messages(patched, tc_ids, end)
-            hint = build_rule_hint(patched, start, expanded_end)
-            patched = patched[:start] + [HumanMessage(content=hint)] + patched[expanded_end + 1 :]
-
-        return patched
+        return self._apply_patches_to_merged(messages, merged)
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
@@ -197,6 +207,37 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if thread_id:
             return thread_id
         return "default"
+
+    def _get_thread_id_from_request(self, request: ModelRequest) -> str:
+        """Extract thread_id from request.runtime.context, fallback to 'default'."""
+        runtime = getattr(request, "runtime", None)
+        if runtime is None:
+            return "default"
+        ctx = getattr(runtime, "context", None)
+        if not ctx:
+            return "default"
+        return ctx.get("thread_id", "default")
+
+    def _log_first_detected_loops(
+        self,
+        thread_id: str,
+        merged: list[tuple[set[str], int, int]],
+    ) -> None:
+        """Emit `loop.rewind.first_detected` log once per (thread_id, loop_hash)."""
+        reported = self._reported_loops[thread_id]
+        for hashes, start, end in merged:
+            for h in hashes:
+                if h not in reported:
+                    reported.add(h)
+                    logger.warning(
+                        "loop.rewind.first_detected",
+                        extra={
+                            "thread_id": thread_id,
+                            "loop_hash": h,
+                            "loop_start_idx": start,
+                            "loop_end_idx": end,
+                        },
+                    )
 
     def _evict_if_needed(self) -> None:
         """Evict least recently used threads if over the limit.
@@ -307,9 +348,16 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        patched = self._apply_all_patches(request.messages)
-        if patched is not request.messages and patched != request.messages:
-            request = request.override(messages=patched)
+        loops = self._detect_all_loops(request.messages)
+        if not loops:
+            return handler(request)
+
+        merged = self._merge_overlapping(loops)
+        thread_id = self._get_thread_id_from_request(request)
+        self._log_first_detected_loops(thread_id, merged)
+
+        patched = self._apply_patches_to_merged(request.messages, merged)
+        request = request.override(messages=patched)
         return handler(request)
 
     @override
@@ -318,9 +366,16 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        patched = self._apply_all_patches(request.messages)
-        if patched is not request.messages and patched != request.messages:
-            request = request.override(messages=patched)
+        loops = self._detect_all_loops(request.messages)
+        if not loops:
+            return await handler(request)
+
+        merged = self._merge_overlapping(loops)
+        thread_id = self._get_thread_id_from_request(request)
+        self._log_first_detected_loops(thread_id, merged)
+
+        patched = self._apply_patches_to_merged(request.messages, merged)
+        request = request.override(messages=patched)
         return await handler(request)
 
     def reset(self, thread_id: str | None = None) -> None:
