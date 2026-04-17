@@ -61,3 +61,91 @@ def _extract_intent(ai_message) -> str | None:
     if len(text) > _INTENT_MAX_CHARS:
         return text[:_INTENT_MAX_CHARS].rstrip() + "..."
     return text
+
+
+from langchain_core.messages import AIMessage, ToolMessage
+
+_FALLBACK_HINT = (
+    "[LOOP RECOVERY] Repeated tool calls detected. Stop calling tools and produce "
+    "your final answer using whatever information you have so far."
+)
+
+
+def build_rule_hint(messages: list, start: int, end: int) -> str:
+    """Build a human-readable rule-based hint for a loop region.
+
+    Args:
+        messages: full message list (the patched view's source)
+        start: inclusive start index of the merged loop region
+        end: inclusive end index (last message belonging to the region,
+             including paired ToolMessages)
+
+    Returns:
+        Hint string. Falls back to _FALLBACK_HINT when no AIMessage/ToolMessage
+        pairs can be extracted from the region.
+    """
+    region = messages[start : end + 1]
+
+    # Walk region, pair each AIMessage.tool_call with its ToolMessage by id
+    pending: dict[str, tuple[str, str]] = {}   # tool_call_id -> (name, salient_args_str)
+    attempts: list[tuple[str, str, str, bool]] = []   # (name, args, result_preview, is_error)
+
+    for msg in region:
+        if isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                tc_id = tc.get("id")
+                if tc_id is None:
+                    continue
+                name = tc.get("name", "?")
+                args = tc.get("args", {}) if isinstance(tc.get("args"), dict) else {}
+                pending[tc_id] = (name, _salient_args(args))
+        elif isinstance(msg, ToolMessage):
+            tc_id = getattr(msg, "tool_call_id", None)
+            if tc_id and tc_id in pending:
+                name, args = pending.pop(tc_id)
+                content = msg.content if msg.content is not None else ""
+                preview = (str(content)[:120]).strip() if content else "(empty)"
+                is_error = isinstance(content, str) and content.startswith("Error:")
+                attempts.append((name, args, preview, is_error))
+
+    if not attempts:
+        return _FALLBACK_HINT
+
+    # Dedupe by (name, args)
+    seen: dict[tuple[str, str], tuple[str, bool]] = {}
+    for name, args, preview, is_err in attempts:
+        seen.setdefault((name, args), (preview, is_err))
+
+    errors = [(k, v) for k, v in seen.items() if v[1]]
+    unhelpful = [(k, v) for k, v in seen.items() if not v[1]]
+
+    lines: list[str] = []
+    intent = _extract_intent(messages[start]) if isinstance(messages[start], AIMessage) else None
+    if intent:
+        lines.append("[LOOP RECOVERY] Original intent at the start of this loop region:")
+        lines.append(f'  "{intent}"')
+        lines.append("")
+        lines.append("These tool-call paths have been ruled out:")
+    else:
+        lines.append("[LOOP RECOVERY] These tool-call paths have been ruled out:")
+
+    if errors:
+        lines.append("")
+        lines.append("Failed with errors:")
+        for (name, args), (preview, _) in errors:
+            lines.append(f"  ✗ {name}({args}) → {preview[:80]}")
+
+    if unhelpful:
+        lines.append("")
+        lines.append("Returned unhelpful results:")
+        for (name, args), (preview, _) in unhelpful:
+            lines.append(f"  ○ {name}({args}) → {preview[:80]}")
+
+    lines.append("")
+    lines.append("Do NOT retry the ruled-out paths. Reassess your approach toward the original")
+    lines.append("intent. Choose:")
+    lines.append("  (a) a different tool")
+    lines.append("  (b) different arguments")
+    lines.append("  (c) produce a final answer using partial information.")
+
+    return "\n".join(lines)
