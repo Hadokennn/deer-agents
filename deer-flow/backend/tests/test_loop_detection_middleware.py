@@ -3,6 +3,7 @@
 import copy
 from unittest.mock import MagicMock
 
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
@@ -44,6 +45,20 @@ def _make_state(tool_calls=None, content=""):
 
 def _bash_call(cmd="ls"):
     return {"name": "bash", "id": f"call_{cmd}", "args": {"command": cmd}}
+
+
+def _model_request(messages):
+    """Build a minimal ModelRequest for wrap_model_call testing."""
+    req = MagicMock(spec=ModelRequest)
+    req.messages = messages
+    captured = {}
+
+    def fake_override(messages):
+        captured["messages"] = messages
+        return req
+    req.override = MagicMock(side_effect=fake_override)
+    req._captured = captured
+    return req
 
 
 class TestHashToolCalls:
@@ -578,3 +593,35 @@ class TestApplyAllPatches:
         once = mw._apply_all_patches(msgs)
         twice = mw._apply_all_patches(once)
         assert [m.content for m in once] == [m.content for m in twice]
+
+
+class TestWrapModelCall:
+    def test_no_loop_passes_request_unchanged(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [_ai("", [_tc("read_file", "/a", "c1")]), _tm("ok", "c1")]
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="response")
+
+        result = mw.wrap_model_call(req, handler)
+
+        req.override.assert_not_called()
+        handler.assert_called_once_with(req)
+        assert result == "response"
+
+    def test_loop_triggers_patching(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="response")
+
+        mw.wrap_model_call(req, handler)
+
+        req.override.assert_called_once()
+        patched = req._captured["messages"]
+        # 6 original → 1 hint
+        assert len(patched) == 1
+        assert "[LOOP RECOVERY]" in patched[0].content
+        handler.assert_called_once()

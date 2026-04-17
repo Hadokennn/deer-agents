@@ -15,10 +15,12 @@ Detection strategy:
 import logging
 import threading
 from collections import OrderedDict, defaultdict
+from collections.abc import Awaitable, Callable
 from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
@@ -321,6 +323,28 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        patched = self._apply_all_patches(request.messages)
+        if patched is not request.messages and patched != request.messages:
+            request = request.override(messages=patched)
+        return handler(request)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        patched = self._apply_all_patches(request.messages)
+        if patched is not request.messages and patched != request.messages:
+            request = request.override(messages=patched)
+        return await handler(request)
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""
