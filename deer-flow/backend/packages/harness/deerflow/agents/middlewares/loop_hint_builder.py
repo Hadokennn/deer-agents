@@ -185,3 +185,25 @@ def _has_meaningful_text(content) -> bool:
     if all_filler:
         return False
     return True
+
+
+def build_no_progress_hint(messages: list, start: int, end: int) -> str:
+    """Build hint for V2.1 no-progress detection.
+
+    Counts tool-call-bearing AIMessages in the region; produces an actionable
+    three-choice prompt guiding the model out of exploratory paralysis.
+    """
+    tool_call_turns = sum(
+        1
+        for m in messages[start : end + 1]
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+    )
+
+    return (
+        f"[NO PROGRESS] You've made {tool_call_turns} tool calls in recent turns "
+        "without forming a hypothesis, conclusion, or progress statement.\n\n"
+        "Stop exploring. Choose:\n"
+        "  (a) commit to ONE specific approach and pursue it\n"
+        "  (b) summarize what you know and produce a final answer\n"
+        "  (c) explicitly state why the task may not be solvable with available tools"
+    )

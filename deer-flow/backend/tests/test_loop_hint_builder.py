@@ -7,6 +7,7 @@ from deerflow.agents.middlewares.loop_hint_builder import (
     _extract_text,
     _has_meaningful_text,
     _salient_args,
+    build_no_progress_hint,
     build_rule_hint,
 )
 
@@ -176,3 +177,30 @@ class TestBuildRuleHint:
         # Fallback hint is shorter generic warning, no per-tool listing
         assert "LOOP" in hint
         assert "/a.py" not in hint
+
+
+class TestBuildNoProgressHint:
+    def test_contains_no_progress_header(self):
+        msgs = []
+        for i in range(10):
+            msgs.append(_ai("", [_tc("read_file", {"path": f"/f{i}"}, f"c{i}")]))
+            msgs.append(_tool_msg("ok", f"c{i}"))
+        hint = build_no_progress_hint(msgs, start=0, end=len(msgs) - 1)
+        assert "[NO PROGRESS]" in hint
+        assert "tool calls" in hint
+
+    def test_contains_three_choices(self):
+        msgs = [_ai("", [_tc("read_file", {"path": "/a"}, "c1")])]
+        hint = build_no_progress_hint(msgs, start=0, end=0)
+        assert "(a)" in hint
+        assert "(b)" in hint
+        assert "(c)" in hint
+
+    def test_mentions_tool_call_count(self):
+        msgs = []
+        for i in range(7):
+            msgs.append(_ai("", [_tc("read_file", {"path": f"/f{i}"}, f"c{i}")]))
+            msgs.append(_tool_msg("ok", f"c{i}"))
+        hint = build_no_progress_hint(msgs, start=0, end=len(msgs) - 1)
+        # Should mention 7 tool calls in the region
+        assert "7" in hint
