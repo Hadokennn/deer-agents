@@ -110,6 +110,24 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         ]
         return sorted(loops, key=lambda t: t[1])
 
+    def _merge_overlapping(
+        self, regions: list[tuple[str, int, int]]
+    ) -> list[tuple[set[str], int, int]]:
+        """Merge overlapping or adjacent regions, aggregating their hash sets.
+
+        Two regions [a, b] and [c, d] (a <= c) merge if c <= b + 1.
+        """
+        if not regions:
+            return []
+        merged: list[tuple[set[str], int, int]] = []
+        for h, start, end in regions:
+            if merged and start <= merged[-1][2] + 1:
+                hashes, m_start, m_end = merged[-1]
+                merged[-1] = (hashes | {h}, m_start, max(m_end, end))
+            else:
+                merged.append(({h}, start, end))
+        return merged
+
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
         thread_id = runtime.context.get("thread_id") if runtime.context else None

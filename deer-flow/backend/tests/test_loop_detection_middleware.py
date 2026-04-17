@@ -468,3 +468,35 @@ class TestDetectAllLoops:
             _tm("ok", "c2"),
         ]
         assert mw._detect_all_loops(msgs) == []
+
+
+class TestMergeOverlapping:
+    def test_empty(self):
+        mw = LoopDetectionMiddleware()
+        assert mw._merge_overlapping([]) == []
+
+    def test_single_region(self):
+        mw = LoopDetectionMiddleware()
+        result = mw._merge_overlapping([("h1", 0, 5)])
+        assert result == [({"h1"}, 0, 5)]
+
+    def test_disjoint_regions_unmerged(self):
+        mw = LoopDetectionMiddleware()
+        result = mw._merge_overlapping([("h1", 0, 3), ("h2", 10, 15)])
+        assert result == [({"h1"}, 0, 3), ({"h2"}, 10, 15)]
+
+    def test_overlapping_regions_merged(self):
+        mw = LoopDetectionMiddleware()
+        result = mw._merge_overlapping([("h1", 0, 8), ("h2", 5, 12)])
+        assert result == [({"h1", "h2"}, 0, 12)]
+
+    def test_adjacent_regions_merged(self):
+        mw = LoopDetectionMiddleware()
+        result = mw._merge_overlapping([("h1", 0, 5), ("h2", 6, 10)])
+        # adjacent (start <= prev_end + 1) → merged
+        assert result == [({"h1", "h2"}, 0, 10)]
+
+    def test_nested_regions_merged(self):
+        mw = LoopDetectionMiddleware()
+        result = mw._merge_overlapping([("h1", 0, 20), ("h2", 5, 10)])
+        assert result == [({"h1", "h2"}, 0, 20)]
