@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Defaults — can be overridden via constructor
 _DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
+_DEFAULT_REWIND_THRESHOLD = 3  # rewind threshold for _detect_all_loops
 _DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
@@ -59,12 +60,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     def __init__(
         self,
         warn_threshold: int = _DEFAULT_WARN_THRESHOLD,
+        rewind_threshold: int = _DEFAULT_REWIND_THRESHOLD,
         hard_limit: int = _DEFAULT_HARD_LIMIT,
         window_size: int = _DEFAULT_WINDOW_SIZE,
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
+        self.rewind_threshold = rewind_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
         self.max_tracked_threads = max_tracked_threads
@@ -72,6 +75,40 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Per-thread tracking using OrderedDict for LRU eviction
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
+
+    def _detect_all_loops(self, messages: list) -> list[tuple[str, int, int]]:
+        """Find all tool-call hashes that meet rewind_threshold in messages.
+
+        Returns list of (hash, first_ai_idx, last_ai_idx) sorted by first_ai_idx.
+        Indices reference AIMessage positions; ToolMessage absorption happens later.
+        """
+        from langchain_core.messages import AIMessage as _AIMessage
+
+        hash_counts: dict[str, int] = {}
+        hash_first_idx: dict[str, int] = {}
+        hash_last_idx: dict[str, int] = {}
+
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, _AIMessage):
+                continue
+            tcs = getattr(msg, "tool_calls", None)
+            if not tcs:
+                continue
+            try:
+                h = _hash_tool_calls(tcs)
+            except Exception:
+                logger.warning("Failed to hash tool_calls at index %d, skipping", i)
+                continue
+            hash_counts[h] = hash_counts.get(h, 0) + 1
+            hash_first_idx.setdefault(h, i)
+            hash_last_idx[h] = i
+
+        loops = [
+            (h, hash_first_idx[h], hash_last_idx[h])
+            for h, count in hash_counts.items()
+            if count >= self.rewind_threshold
+        ]
+        return sorted(loops, key=lambda t: t[1])
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""

@@ -3,13 +3,25 @@
 import copy
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
+
+
+def _ai(content="", tool_calls=()):
+    return AIMessage(content=content, tool_calls=list(tool_calls))
+
+
+def _tc(name, path, tc_id):
+    return {"name": name, "args": {"path": path}, "id": tc_id}
+
+
+def _tm(content, tc_id, name="read_file"):
+    return ToolMessage(content=content, tool_call_id=tc_id, name=name)
 
 
 def _make_runtime(thread_id="test-thread"):
@@ -410,3 +422,49 @@ class TestHardStopWithListContent:
         assert isinstance(msg.content, str)
         assert msg.content.startswith("thinking...")
         assert _HARD_STOP_MSG in msg.content
+
+
+class TestDetectAllLoops:
+    def test_no_loop_returns_empty(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [
+            _ai("", [_tc("read_file", "/a", "c1")]),
+            _tm("ok", "c1"),
+        ]
+        assert mw._detect_all_loops(msgs) == []
+
+    def test_single_loop_at_threshold_returns_one(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        loops = mw._detect_all_loops(msgs)
+        assert len(loops) == 1
+        # (hash, first_idx, last_idx) — first AIMessage at idx 0, last at idx 4
+        h, first, last = loops[0]
+        assert first == 0
+        assert last == 4
+
+    def test_two_disjoint_loops_returns_both(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"a{i}")]))
+            msgs.append(_tm("err", f"a{i}"))
+        msgs.append(_ai("intermediate non-loop", []))
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/b", f"b{i}")]))
+            msgs.append(_tm("err", f"b{i}"))
+        loops = mw._detect_all_loops(msgs)
+        assert len(loops) == 2
+
+    def test_below_threshold_not_detected(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [
+            _ai("", [_tc("read_file", "/a", "c1")]),
+            _tm("ok", "c1"),
+            _ai("", [_tc("read_file", "/a", "c2")]),
+            _tm("ok", "c2"),
+        ]
+        assert mw._detect_all_loops(msgs) == []
