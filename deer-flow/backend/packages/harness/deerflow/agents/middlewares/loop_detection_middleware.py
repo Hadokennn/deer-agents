@@ -19,7 +19,7 @@ from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.loop_hash import (
@@ -27,6 +27,7 @@ from deerflow.agents.middlewares.loop_hash import (
     normalize_tool_call_args as _normalize_tool_call_args,
     stable_tool_key as _stable_tool_key,
 )
+from deerflow.agents.middlewares.loop_hint_builder import build_rule_hint
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,41 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             else:
                 merged.append(({h}, start, end))
         return merged
+
+    def _collect_tool_call_ids_in_range(
+        self, messages: list, start: int, end: int
+    ) -> set[str]:
+        """Collect tool_call_id values from AIMessages in [start, end]."""
+        ids: set[str] = set()
+        for i in range(start, end + 1):
+            msg = messages[i]
+            if isinstance(msg, AIMessage):
+                for tc in getattr(msg, "tool_calls", None) or []:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        ids.add(tc_id)
+        return ids
+
+    def _apply_all_patches(self, messages: list) -> list:
+        """Detect all loops, merge overlapping, apply patches from end to start.
+
+        Returns a new list (does not mutate input).
+        """
+        loops = self._detect_all_loops(messages)
+        if not loops:
+            return list(messages)
+
+        merged = self._merge_overlapping(loops)
+
+        # Process from end to start to keep earlier indices valid
+        patched = list(messages)
+        for hashes, start, end in sorted(merged, key=lambda r: -r[1]):
+            tc_ids = self._collect_tool_call_ids_in_range(patched, start, end)
+            expanded_end = self._expand_for_tool_messages(patched, tc_ids, end)
+            hint = build_rule_hint(patched, start, expanded_end)
+            patched = patched[:start] + [HumanMessage(content=hint)] + patched[expanded_end + 1 :]
+
+        return patched
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""

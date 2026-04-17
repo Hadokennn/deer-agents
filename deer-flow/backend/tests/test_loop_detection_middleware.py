@@ -529,3 +529,52 @@ class TestExpandForToolMessages:
         ]
         result = mw._expand_for_tool_messages(msgs, tool_call_ids={"c1"}, region_end=0)
         assert result == 1   # stops before the unrelated AIMessage at idx 2
+
+
+class TestApplyAllPatches:
+    def test_no_loops_returns_unchanged(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = [_ai("only one", [_tc("read_file", "/a", "c1")]), _tm("ok", "c1")]
+        patched = mw._apply_all_patches(msgs)
+        assert patched == msgs   # no loops → identical
+
+    def test_single_loop_replaced_with_hint(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("Searching for the bug in foo.py based on stack trace.",
+                            [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("Error: not found", f"c{i}"))
+        patched = mw._apply_all_patches(msgs)
+        # Original 6 messages → patched into 1 HumanMessage
+        assert len(patched) == 1
+        assert "[LOOP RECOVERY]" in patched[0].content
+        assert "ruled out" in patched[0].content.lower()
+
+    def test_two_disjoint_loops_two_patches(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"a{i}")]))
+            msgs.append(_tm("err", f"a{i}"))
+        msgs.append(_ai("intermediate", []))
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/b", f"b{i}")]))
+            msgs.append(_tm("err", f"b{i}"))
+        patched = mw._apply_all_patches(msgs)
+        # Two HumanMessage hints + the intermediate AIMessage
+        assert len(patched) == 3
+        assert "/a" in patched[0].content   # first hint
+        assert patched[1].content == "intermediate"
+        assert "/b" in patched[2].content   # second hint
+
+    def test_idempotence(self):
+        """Applying patch twice yields identical result."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/a", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        once = mw._apply_all_patches(msgs)
+        twice = mw._apply_all_patches(once)
+        assert [m.content for m in once] == [m.content for m in twice]
