@@ -677,3 +677,52 @@ class TestEndToEndPatching:
         assert "/foo.py" in hint_msg.content
         # Total length: 3 preserved + 1 hint = 4
         assert len(patched) == 4
+
+
+class TestDetectNoProgress:
+    def test_below_min_window_returns_none(self):
+        mw = LoopDetectionMiddleware()
+        # Only 5 AIMessages — below default min_window_to_trigger=10
+        msgs = []
+        for i in range(5):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        assert mw._detect_no_progress(msgs) is None
+
+    def test_meaningful_thinking_not_detected(self):
+        mw = LoopDetectionMiddleware()
+        msgs = []
+        for i in range(15):
+            content = f"Analyzing file {i}: the pattern suggests a race condition in the worker pool based on stack trace."
+            msgs.append(_ai(content, [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        assert mw._detect_no_progress(msgs) is None
+
+    def test_tool_only_no_progress_detected(self):
+        mw = LoopDetectionMiddleware()
+        msgs = []
+        for i in range(15):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))   # empty content
+            msgs.append(_tm("ok", f"c{i}"))
+        region = mw._detect_no_progress(msgs)
+        assert region is not None
+        start, end = region
+        # Should cover the AIMessage range (indices 0, 2, 4, ..., 28)
+        assert start == 0
+        assert end == 28
+
+    def test_mixed_but_mostly_no_progress(self):
+        mw = LoopDetectionMiddleware(
+            # allow triggering with 15 window + 0.85 ratio
+        )
+        msgs = []
+        # 13 no-progress + 2 meaningful = 13/15 = 86.6% > 85%
+        for i in range(13):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+        for i in range(2):
+            meaningful = f"Based on the data seen so far, the bug appears to be in module X because the stack trace clearly shows the failure point at line 42."
+            msgs.append(_ai(meaningful, [_tc("read_file", f"/g{i}", f"g{i}")]))
+            msgs.append(_tm("ok", f"g{i}"))
+        region = mw._detect_no_progress(msgs)
+        assert region is not None

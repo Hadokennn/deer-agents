@@ -29,7 +29,10 @@ from deerflow.agents.middlewares.loop_hash import (
     normalize_tool_call_args as _normalize_tool_call_args,
     stable_tool_key as _stable_tool_key,
 )
-from deerflow.agents.middlewares.loop_hint_builder import build_rule_hint
+from deerflow.agents.middlewares.loop_hint_builder import (
+    _has_meaningful_text,
+    build_rule_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +195,41 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         merged = self._merge_overlapping(loops)
         return self._apply_patches_to_merged(messages, merged)
+
+    def _detect_no_progress(
+        self,
+        messages: list,
+        window: int = 15,
+        min_window_to_trigger: int = 10,
+        no_progress_ratio: float = 0.85,
+    ) -> tuple[int, int] | None:
+        """V2.1 detector: detects "lots of tool calls with no meaningful thinking".
+
+        Returns (patch_start_idx, patch_end_idx) of the AIMessage range to patch,
+        or None if not triggered.
+        """
+        recent_ai_with_idx: list[tuple[int, AIMessage]] = []
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], AIMessage):
+                recent_ai_with_idx.append((i, messages[i]))
+                if len(recent_ai_with_idx) >= window:
+                    break
+        if len(recent_ai_with_idx) < min_window_to_trigger:
+            return None
+
+        recent_ai_with_idx.reverse()
+
+        no_progress = sum(
+            1 for _, ai in recent_ai_with_idx
+            if getattr(ai, "tool_calls", None)
+            and not _has_meaningful_text(ai.content)
+        )
+        if no_progress / len(recent_ai_with_idx) < no_progress_ratio:
+            return None
+
+        patch_start = recent_ai_with_idx[0][0]
+        patch_end = recent_ai_with_idx[-1][0]
+        return patch_start, patch_end
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
