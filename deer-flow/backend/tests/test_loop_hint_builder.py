@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from deerflow.agents.middlewares.loop_hint_builder import (
     _extract_intent,
     _extract_text,
+    _has_meaningful_text,
     _salient_args,
     build_rule_hint,
 )
@@ -77,6 +78,31 @@ class TestExtractIntent:
     def test_empty_content_returns_none(self):
         ai = AIMessage(content="", tool_calls=[])
         assert _extract_intent(ai) is None
+
+
+class TestHasMeaningfulText:
+    def test_short_text_not_meaningful(self):
+        assert _has_meaningful_text("ok") is False
+        assert _has_meaningful_text("") is False
+        assert _has_meaningful_text(None) is False
+
+    def test_text_over_80_chars_meaningful(self):
+        text = "The stack trace points to a missing import. Let me check the module structure carefully."
+        assert _has_meaningful_text(text) is True
+
+    def test_filler_only_not_meaningful(self):
+        text = "Let me try this. I'll check the next file. Let me see."
+        assert _has_meaningful_text(text) is False
+
+    def test_filler_with_real_content_meaningful(self):
+        text = "Let me check the imports. The stack points at line 42 which suggests a race condition in the worker pool."
+        assert _has_meaningful_text(text) is True
+
+    def test_list_content_evaluated(self):
+        content = [
+            {"type": "text", "text": "The root cause appears to be a mismatched schema between service A and service B after the deploy."},
+        ]
+        assert _has_meaningful_text(content) is True
 
 
 def _ai(intent="", tool_calls=()):

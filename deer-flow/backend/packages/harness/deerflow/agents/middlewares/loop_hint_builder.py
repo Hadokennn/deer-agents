@@ -149,3 +149,39 @@ def build_rule_hint(messages: list, start: int, end: int) -> str:
     lines.append("  (c) produce a final answer using partial information.")
 
     return "\n".join(lines)
+
+
+_FILLER_PHRASES = (
+    "let me",
+    "i'll",
+    "i will",
+    "let's",
+    "now i'll",
+    "now let me",
+    "i need to",
+    "going to",
+    "next i'll",
+)
+
+_MEANINGFUL_MIN_CHARS = 80
+
+
+def _has_meaningful_text(content) -> bool:
+    """Return True if content contains substantive reasoning/conclusion text.
+
+    Signal definition:
+      - length >= _MEANINGFUL_MIN_CHARS (filter out filler like "ok", "trying...")
+      - NOT all sentences start with filler phrases (filter mechanical narration)
+    """
+    text = _extract_text(content).strip()
+    if len(text) < _MEANINGFUL_MIN_CHARS:
+        return False
+    sentences = [s.strip().lower() for s in text.split(".") if s.strip()]
+    if not sentences:
+        return False
+    all_filler = all(
+        any(s.startswith(p) for p in _FILLER_PHRASES) for s in sentences
+    )
+    if all_filler:
+        return False
+    return True
