@@ -10,10 +10,6 @@ Detection strategy:
   2. Hard-stop safety net (after_model): if the same tool-call hash appears
      >= hard_limit times in the sliding window, strip all tool_calls from
      the response so the agent is forced to produce a final text answer.
-
-Note: the warn tier (additive HumanMessage at warn_threshold) was removed
-in favor of (1). The ``warn_threshold`` constructor parameter is retained
-for backwards compatibility and scheduled for removal in a follow-up task.
 """
 
 import logging
@@ -38,14 +34,11 @@ from deerflow.agents.middlewares.loop_hint_builder import build_rule_hint
 logger = logging.getLogger(__name__)
 
 # Defaults — can be overridden via constructor
-_DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
 _DEFAULT_REWIND_THRESHOLD = 3  # rewind threshold for _detect_all_loops
 _DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 
-
-_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 
@@ -54,8 +47,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     """Detects and breaks repetitive tool call loops.
 
     Args:
-        warn_threshold: Number of identical tool call sets before injecting
-            a warning message. Default: 3.
+        rewind_threshold: Number of identical tool call sets before
+            view-layer patching collapses the loop region into a hint.
+            Default: 3.
         hard_limit: Number of identical tool call sets before stripping
             tool_calls entirely. Default: 5.
         window_size: Size of the sliding window for tracking calls.
@@ -66,14 +60,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     def __init__(
         self,
-        warn_threshold: int = _DEFAULT_WARN_THRESHOLD,
         rewind_threshold: int = _DEFAULT_REWIND_THRESHOLD,
         hard_limit: int = _DEFAULT_HARD_LIMIT,
         window_size: int = _DEFAULT_WINDOW_SIZE,
         max_tracked_threads: int = _DEFAULT_MAX_TRACKED_THREADS,
     ):
         super().__init__()
-        self.warn_threshold = warn_threshold
         self.rewind_threshold = rewind_threshold
         self.hard_limit = hard_limit
         self.window_size = window_size
@@ -383,5 +375,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             if thread_id:
                 self._history.pop(thread_id, None)
+                self._reported_loops.pop(thread_id, None)
             else:
                 self._history.clear()
+                self._reported_loops.clear()
