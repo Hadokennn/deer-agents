@@ -11,6 +11,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
+from deerflow.agents.middlewares.loop_hint_builder import build_no_progress_hint
 
 
 def _ai(content="", tool_calls=()):
@@ -726,3 +727,68 @@ class TestDetectNoProgress:
             msgs.append(_tm("ok", f"g{i}"))
         region = mw._detect_no_progress(msgs)
         assert region is not None
+
+
+class TestDetectorPriority:
+    def test_hash_loop_takes_priority_over_no_progress(self):
+        """When both V1 and V2.1 would trigger, V1 wins (more specific)."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        # V1 hash loop: 3 identical tool calls
+        for i in range(3):
+            msgs.append(_ai("", [_tc("read_file", "/same", f"c{i}")]))
+            msgs.append(_tm("err", f"c{i}"))
+        # Extend to trigger V2.1 as well: more empty-content tool-call AIMessages
+        for i in range(12):
+            msgs.append(_ai("", [_tc("grep", {"path": f"/f{i}"}, f"g{i}")]))
+            msgs.append(_tm("ok", f"g{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        # V1 hint (has "[LOOP RECOVERY]") should appear, not V2.1 hint ("[NO PROGRESS]")
+        patched = req._captured["messages"]
+        combined = "\n".join(
+            m.content for m in patched if isinstance(m, HumanMessage)
+        )
+        assert "[LOOP RECOVERY]" in combined
+        assert "[NO PROGRESS]" not in combined
+
+    def test_no_progress_fires_when_no_hash_loop(self):
+        """V2.1 fallback triggers when V1 detects nothing."""
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        # 15 distinct tool calls, no hash loop, no meaningful thinking
+        for i in range(15):
+            msgs.append(_ai("", [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        patched = req._captured["messages"]
+        combined = "\n".join(
+            m.content for m in patched if isinstance(m, HumanMessage)
+        )
+        assert "[NO PROGRESS]" in combined
+        assert "[LOOP RECOVERY]" not in combined
+
+    def test_neither_fires_on_healthy_thread(self):
+        mw = LoopDetectionMiddleware(rewind_threshold=3)
+        msgs = []
+        for i in range(5):
+            content = (
+                f"Looking at step {i}: the investigation suggests a latency spike in the "
+                f"queue worker based on profiler data from the previous call."
+            )
+            msgs.append(_ai(content, [_tc("read_file", f"/f{i}", f"c{i}")]))
+            msgs.append(_tm("ok", f"c{i}"))
+
+        req = _model_request(msgs)
+        handler = MagicMock(return_value="r")
+        mw.wrap_model_call(req, handler)
+
+        # handler called with original request (no patching)
+        req.override.assert_not_called()

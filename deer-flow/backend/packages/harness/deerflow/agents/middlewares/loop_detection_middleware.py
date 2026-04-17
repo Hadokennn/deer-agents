@@ -31,6 +31,7 @@ from deerflow.agents.middlewares.loop_hash import (
 )
 from deerflow.agents.middlewares.loop_hint_builder import (
     _has_meaningful_text,
+    build_no_progress_hint,
     build_rule_hint,
 )
 
@@ -248,27 +249,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return "default"
         return ctx.get("thread_id", "default")
 
-    def _log_first_detected_loops(
-        self,
-        thread_id: str,
-        merged: list[tuple[set[str], int, int]],
-    ) -> None:
-        """Emit `loop.rewind.first_detected` log once per (thread_id, loop_hash)."""
-        reported = self._reported_loops[thread_id]
-        for hashes, start, end in merged:
-            for h in hashes:
-                if h not in reported:
-                    reported.add(h)
-                    logger.warning(
-                        "loop.rewind.first_detected",
-                        extra={
-                            "thread_id": thread_id,
-                            "loop_hash": h,
-                            "loop_start_idx": start,
-                            "loop_end_idx": end,
-                        },
-                    )
-
     def _evict_if_needed(self) -> None:
         """Evict least recently used threads if over the limit.
 
@@ -372,22 +352,74 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
+    def _compute_patched_messages(self, request: ModelRequest) -> list | None:
+        """Run detectors in priority order; return patched messages or None.
+
+        Priority: V1 hash-based first (most specific), then V2.1 no-progress
+        (general fallback). Returns ``None`` if no detector fires, in which
+        case the request should be passed through unchanged.
+        """
+        messages = request.messages
+        thread_id = self._get_thread_id_from_request(request)
+
+        # V1: hash-based detection (most specific)
+        loops = self._detect_all_loops(messages)
+        if loops:
+            merged = self._merge_overlapping(loops)
+            reported = self._reported_loops[thread_id]
+            for hashes, start, end in merged:
+                for h in hashes:
+                    if h not in reported:
+                        reported.add(h)
+                        logger.warning(
+                            "loop.rewind.first_detected",
+                            extra={
+                                "thread_id": thread_id,
+                                "loop_hash": h,
+                                "loop_start_idx": start,
+                                "loop_end_idx": end,
+                                "detector": "v1_hash",
+                            },
+                        )
+            return self._apply_patches_to_merged(messages, merged)
+
+        # V2.1: no-progress fallback (general)
+        np_region = self._detect_no_progress(messages)
+        if np_region is not None:
+            start, end = np_region
+            np_key = "v2_no_progress"  # coarse per-thread dedup key
+            reported = self._reported_loops[thread_id]
+            if np_key not in reported:
+                reported.add(np_key)
+                logger.warning(
+                    "loop.rewind.first_detected",
+                    extra={
+                        "thread_id": thread_id,
+                        "patch_start": start,
+                        "patch_end": end,
+                        "detector": "v2_no_progress",
+                    },
+                )
+            tc_ids = self._collect_tool_call_ids_in_range(messages, start, end)
+            expanded_end = self._expand_for_tool_messages(messages, tc_ids, end)
+            hint = build_no_progress_hint(messages, start, expanded_end)
+            return (
+                messages[:start]
+                + [HumanMessage(content=hint)]
+                + messages[expanded_end + 1 :]
+            )
+
+        return None
+
     @override
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        loops = self._detect_all_loops(request.messages)
-        if not loops:
-            return handler(request)
-
-        merged = self._merge_overlapping(loops)
-        thread_id = self._get_thread_id_from_request(request)
-        self._log_first_detected_loops(thread_id, merged)
-
-        patched = self._apply_patches_to_merged(request.messages, merged)
-        request = request.override(messages=patched)
+        patched = self._compute_patched_messages(request)
+        if patched is not None:
+            request = request.override(messages=patched)
         return handler(request)
 
     @override
@@ -396,16 +428,9 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        loops = self._detect_all_loops(request.messages)
-        if not loops:
-            return await handler(request)
-
-        merged = self._merge_overlapping(loops)
-        thread_id = self._get_thread_id_from_request(request)
-        self._log_first_detected_loops(thread_id, merged)
-
-        patched = self._apply_patches_to_merged(request.messages, merged)
-        request = request.override(messages=patched)
+        patched = self._compute_patched_messages(request)
+        if patched is not None:
+            request = request.override(messages=patched)
         return await handler(request)
 
     def reset(self, thread_id: str | None = None) -> None:
