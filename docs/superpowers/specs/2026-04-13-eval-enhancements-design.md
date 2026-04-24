@@ -102,7 +102,9 @@ class RunStats:
     pass_count: int
     median_score: float
     score_std: float
-    pass_rate: float
+    pass_rate: float          # pass_count / runs
+    any_passed: bool          # pass@k — 至少一次成功（衡量能力上限）
+    all_passed: bool          # pass^k — 全部成功（衡量可靠性）
 
 @dataclass
 class EvalResult:
@@ -153,17 +155,23 @@ def aggregate_results(results: list[EvalResult]) -> EvalResult:
             median_score=median_score,
             score_std=score_std,
             pass_rate=pass_count / n,
+            any_passed=pass_count > 0,
+            all_passed=pass_count == n,
         ),
     )
 ```
 
 #### Report 打印增强
 
-当 `run_stats` 存在时，追加显示：
+当 `run_stats` 存在时，追加显示 pass@k / pass^k 信息：
 
 ```
-  e2e_overview_request  PASS  0.83  (1520ms)  [3/3 passed, σ=0.06]
+  e2e_overview_request  PASS  0.83  (1520ms)  [3/3 passed, σ=0.06]          # all_passed ✓ 可靠
+  e2e_field_query       PASS  0.70  (2100ms)  [2/3 passed, σ=0.15] ⚡flaky  # any_passed but !all_passed
+  e2e_not_found         FAIL  0.30  (1800ms)  [0/3 passed, σ=0.05]          # !any_passed 能力不足
 ```
+
+`⚡flaky` 标记在 `any_passed=True` 但 `all_passed=False` 时显示，帮助识别不稳定 case。
 
 ### 约束
 
@@ -208,8 +216,8 @@ E2E case 中新增可选的 `judge_rubric` 字段：
     "process_rules": [...],
     "output_checks": {...},
     "judge_rubric": {
-      "dimensions": ["accuracy", "completeness", "conciseness"],
-      "criteria": "回答应准确列出该类目模板下的字段列表，包含字段名称和类型信息。不应编造不存在的字段。",
+      "dimensions": ["accuracy", "groundedness", "completeness", "conciseness"],
+      "criteria": "回答应准确列出该类目模板下的字段列表，包含字段名称和类型信息。不应编造不存在的字段。所有字段信息必须来源于工具实际返回的数据。",
       "reference_answer": "该类目下包含 basicInfo（商品品类 CategorySelect）和 merchantInfo（商家名称 AccountName、商家平台商品ID PlatformProductId）等字段组。",
       "pass_threshold": 0.6
     }
@@ -219,7 +227,7 @@ E2E case 中新增可选的 `judge_rubric` 字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `dimensions` | `list[str]` | 否 | 评分维度，默认 `["accuracy", "completeness", "conciseness"]` |
+| `dimensions` | `list[str]` | 否 | 评分维度，默认 `["accuracy", "groundedness", "completeness", "conciseness"]` |
 | `criteria` | `str` | 是 | 评判标准的自然语言描述 |
 | `reference_answer` | `str` | 否 | 参考答案（给 LLM judge 用作对照） |
 | `pass_threshold` | `float` | 否 | 通过阈值，默认 0.6 |
@@ -253,6 +261,9 @@ JUDGE_SYSTEM_PROMPT = """你是一个严格公正的 AI 评审员。你的任务
 JUDGE_USER_PROMPT = """## 用户查询
 {query}
 
+## Agent 使用的工具输出（事实来源）
+{tool_outputs}
+
 ## Agent 回答
 {response}
 
@@ -276,6 +287,7 @@ JUDGE_USER_PROMPT = """## 用户查询
 ```python
 DIMENSION_DESCRIPTIONS = {
     "accuracy": "准确性 — 回答中的信息是否正确，是否有编造或错误",
+    "groundedness": "基于事实 — 回答中的每个断言是否有工具输出支撑，未编造工具未返回的信息",
     "completeness": "完整性 — 回答是否覆盖了用户问题的所有方面",
     "conciseness": "简洁性 — 回答是否简洁清晰，没有不必要的冗余",
     "helpfulness": "有用性 — 回答是否真正帮助用户解决了问题",
@@ -291,9 +303,14 @@ def judge_response(
     response: str,
     rubric: dict,
     *,
+    tool_outputs: list[dict] | None = None,
     model_name: str | None = None,
 ) -> JudgeResult:
-    """用 LLM 评判 agent 回答质量。"""
+    """用 LLM 评判 agent 回答质量。
+    
+    tool_outputs: 从 capture_run 采集的工具调用结果列表，
+    用于 groundedness 维度的事实核验。
+    """
 ```
 
 使用项目现有的 `create_chat_model` 工厂函数创建 LLM 实例：
@@ -325,6 +342,7 @@ def evaluate(case: EvalCase, **kwargs) -> EvalResult:
             query=case.input["query"],
             response=run.final_response,
             rubric=judge_rubric,
+            tool_outputs=run.tool_calls,  # 传入工具输出，供 groundedness 核验
             model_name=kwargs.get("judge_model"),
         )
         # 将 judge 分数纳入 checks
@@ -460,10 +478,12 @@ def compare_reports(baseline: dict, current: EvalReport) -> DiffReport:
             status = "new"
         else:
             delta = c.score - b["score"]
-            if delta > 0.05:
+            is_capability = "capability" in (c.tags or [])
+            if delta > 0.10:
                 status = "improved"
-            elif delta < -0.05:
-                status = "regressed"
+            elif delta < -0.10:
+                # regression tag 的退化更严重，capability tag 仅记录
+                status = "capability-dip" if is_capability else "regressed"
             else:
                 status = "unchanged"
 
@@ -479,7 +499,7 @@ def compare_reports(baseline: dict, current: EvalReport) -> DiffReport:
         ))
 
     summary = {}
-    for s in ["improved", "regressed", "unchanged", "new", "removed"]:
+    for s in ["improved", "regressed", "capability-dip", "unchanged", "new", "removed"]:
         summary[s] = sum(1 for cd in cases if cd.status == s)
 
     return DiffReport(
@@ -491,13 +511,30 @@ def compare_reports(baseline: dict, current: EvalReport) -> DiffReport:
     )
 ```
 
+#### Case 分类约定：Capability vs Regression
+
+通过 `tags` 区分两类 case，diff 报告对退化的严重程度分级处理：
+
+| Tag | 含义 | 退化时行为 |
+|-----|------|-----------|
+| `regression` | 已验证的能力，必须持续通过 | 退化标记为 🔴 **REGRESSION**，触发醒目警告 |
+| `capability` | 正在攀爬的能力，pass rate 预期波动 | 退化标记为 🟡 **capability-dip**，仅记录不告警 |
+| （无标记） | 默认视为 regression | 同 regression 行为 |
+
+示例 case 定义：
+
+```json
+{"id": "e2e_overview_request", "tags": ["regression", "happy-path"], ...}
+{"id": "e2e_complex_cross_category", "tags": ["capability", "multi-step"], ...}
+```
+
 #### Delta 阈值
 
-- `delta > +0.05` → improved（避免噪声被标记为改善）
-- `delta < -0.05` → regressed
+- `delta > +0.10` → improved（避免噪声被标记为改善）
+- `delta < -0.10` → regressed / capability-dip（根据 tag 分级）
 - 其余 → unchanged
 
-阈值 0.05 是硬编码默认值，后续可配置。
+阈值 0.10 是硬编码默认值（3 次运行 + LLM 非确定性下，0.05 容易产生 false alarm），后续可配置。
 
 #### Diff 控制台输出
 
@@ -510,11 +547,12 @@ Diff Report: oncall / e2e
 
   CASE                                     BASE → NOW   DELTA  STATUS
   e2e_overview_request                     0.75 → 1.00  +0.25  ✅ improved
-  e2e_field_query                          1.00 → 0.33  -0.67  🔴 regressed
+  e2e_field_query          [regression]    1.00 → 0.33  -0.67  🔴 regressed
+  e2e_complex_cross        [capability]    0.50 → 0.35  -0.15  🟡 capability-dip
   e2e_not_found                            0.80 → 0.83  +0.03  ➖ unchanged
   e2e_new_case                                — → 0.90     —   🆕 new
 
-  Summary: 1 improved, 1 regressed, 1 unchanged, 1 new, 0 removed
+  Summary: 1 improved, 1 regressed, 1 capability-dip, 1 unchanged, 1 new, 0 removed
 ```
 
 有回归时（`regressed > 0`），打印醒目警告：
@@ -564,7 +602,7 @@ python scripts/run_eval.py e2e --tag cold-start --runs 3 --diff baseline-v1
 | `evals/framework/types.py` | 修改 | 新增 `RunStats`, `JudgeResult`, `EvalResult.run_stats`, `EvalResult.judge`, `EvalReport.label` |
 | `evals/framework/runner.py` | 修改 | `run_eval` 新增 `runs` 参数，多次运行 + 聚合 |
 | `evals/framework/stats.py` | **新增** | `aggregate_results` 聚合函数 |
-| `evals/framework/judge.py` | **新增** | `judge_response` LLM 评判函数 |
+| `evals/framework/judge.py` | **新增** | `judge_response` LLM 评判函数（含 groundedness 维度 + tool_outputs 注入） |
 | `evals/framework/diff.py` | **新增** | `load_baseline`, `compare_reports`, `CaseDiff`, `DiffReport` |
 | `evals/framework/report.py` | 修改 | `save_report` 支持 label；新增 `print_diff`；打印增强（显示 run_stats, judge） |
 | `evals/oncall/e2e_eval.py` | 修改 | `evaluate` 集成 judge 调用 |
@@ -597,8 +635,9 @@ python scripts/run_eval.py e2e --tag cold-start --runs 3 --diff baseline-v1
 | 测试文件 | 覆盖 |
 |----------|------|
 | `tests/test_eval_stats.py` | `aggregate_results` — 多结果聚合、中位数、pass 判定 |
-| `tests/test_eval_judge.py` | `judge_response` — prompt 构建、JSON 解析、容错 |
-| `tests/test_eval_diff.py` | `compare_reports` — improved/regressed/unchanged/new/removed 判定 |
+| `tests/test_eval_judge.py` | `judge_response` — prompt 构建、JSON 解析、容错、groundedness 维度 |
+| `tests/test_eval_diff.py` | `compare_reports` — improved/regressed/capability-dip/unchanged/new/removed 判定 |
+| `tests/test_judge_calibration.py` | Judge 校准 — judge score 与人类标注相关性 > 0.7 |
 | `tests/test_eval_types.py` (扩展) | 新增字段的序列化/构造 |
 | `tests/test_eval_runner.py` (扩展) | `runs > 1` 的聚合集成 |
 
@@ -607,6 +646,28 @@ python scripts/run_eval.py e2e --tag cold-start --runs 3 --diff baseline-v1
 - `python scripts/run_eval.py tool --save --label test-baseline`
 - `python scripts/run_eval.py tool --save --diff test-baseline`
 - `python scripts/run_eval.py e2e --runs 3 --save --label e2e-test` (需要真实 LLM)
+
+### Judge 校准
+
+LLM-as-Judge 的评分必须与人类判断对齐，否则分数不可信。校准流程：
+
+1. 人工标注 5-10 个 case 的 expected score（每个维度），存入 `evals/oncall/judge_calibration.json`
+2. 跑 judge，对比 judge score vs human score
+3. 维度级偏差 > 0.2 时调整 prompt 措辞或评分锚点描述
+4. 新增 `tests/test_judge_calibration.py`：加载校准数据，断言 judge score 与人类标注的 Pearson 相关系数 > 0.7
+
+校准数据格式：
+
+```json
+[
+  {
+    "case_id": "e2e_overview_request",
+    "query": "...",
+    "response": "...",
+    "human_scores": {"accuracy": 0.9, "groundedness": 0.8, "completeness": 0.7, "conciseness": 0.9}
+  }
+]
+```
 
 ---
 
@@ -622,3 +683,30 @@ python scripts/run_eval.py e2e --tag cold-start --runs 3 --diff baseline-v1
 | Phase 6 | 测试用例 | Phase 2-5 |
 
 Phase 2、3、4 之间无依赖，可并行实现。
+
+---
+
+## Future Consideration: Single-Step Eval
+
+> 不在本次 scope，但架构上不应堵死这条路。
+
+LangChain 团队的核心发现：完整 e2e 运行成本高，**single-step eval**（只跑一步就中断）是高 ROI 的补充——在关键决策点验证 agent 选了对的 tool、传了对的参数，不执行完整流程。成本约为 e2e 的 1/10，适合 PR 级快速回归。
+
+LangGraph 原生支持 `interrupt_before` 节点中断，deer-flow 的 agent 可以利用这一机制。
+
+**接口预留**：`layer` 字段已支持 `"tool"` / `"process"` / `"e2e"`，未来可扩展 `"decision"` 类型，case 定义中指定中断节点和期望的 tool call。
+
+```json
+{
+  "id": "decision_should_search_schema",
+  "layer": "decision",
+  "input": {"query": "这个类目下有哪些字段？"},
+  "expected": {
+    "interrupt_at": "tool_selection",
+    "expected_tool": "locate_field_schema",
+    "expected_args_contain": {"category": "果蔬生鲜"}
+  }
+}
+```
+
+**当前无需实现**，但 `runner.py` 的 `load_cases` 和 layer 路由逻辑不应硬编码三种 layer。
